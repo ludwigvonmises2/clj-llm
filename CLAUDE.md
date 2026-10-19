@@ -1,44 +1,61 @@
-# clj-llm
+# clj-llm — sistema de trading mecánico en Clojure
 
-Un transformer GPT completo (tokenizador char-level, multi-head causal
-attention, backpropagation manual, AdamW, muestreo top-k) en Clojure puro
-sobre `float[]` de Java. Sin dependencias de ML.
+Transformer GPT y LLM genérico ELIMINADOS (código obsoleto). Este repo es
+ahora un sistema de trading mecánico profesional: señales causales
+(solo datos pasados), backtester sin look-ahead, métricas profesionales,
+verificación walk-forward por pliegues y robustez Monte Carlo.
 
 ## Flujo de desarrollo (OBLIGATORIO)
 
-**Usar siempre clojure-mcp / nREPL persistente** para evaluar Clojure — nunca
-`clojure -M -e` en bucle (cada llamada arranca una JVM nueva y recompila todo).
+- nREPL persistente: `clojure -M:nrepl` (puerto 7888) o `clojure -T:mcp`
+  (bhauman/clojure-mcp). Nunca `clojure -M -e` en bucle.
+- Para editar `.clj`/`.edn` usar las tools paren-aware de clojure-mcp;
+  los seds con paréntesis desequilibran forms.
+- El formateador automático reflowa ficheros: tras un sed, verificar el
+  balance con awk (gsub de paréntesis) antes de correr.
 
-- Servidor MCP: `clojure -T:mcp` (alias global en `~/.clojure/deps.edn`,
-  bhauman/clojure-mcp, nREPL en el puerto 7888).
-- nREPL directo del proyecto: `clojure -M:nrepl` en background.
-- Evaluar código con la skill `clojure-eval` (usa clj-nrepl-eval contra el
-  puerto 7888).
-- **Para editar ficheros `.clj`/`.edn`, preferir las tools paren-aware de
-  clojure-mcp** (`clojure-edit`, `clojure-rewrite-edit`, `paren-tool`):
-  preservan el balance de paréntesis por estructura, en vez de ediciones de
-  texto plano propensas a desequilibrar forms (los seds con paréntesis ya
-  nos costaron varios ciclos de reparación).
+## Arquitectura (src/trade, sin dependencias)
 
-## Comandos
+| ns | papel |
+|----|-------|
+| `trade.data` | carga OHLCV (Binance klines, Alpaca ajustado) + indicadores |
+| `trade.signals` | exposiciones causales: `sma-crossover`, `triple-trend`, `mr-zscore`, `intraday-ensemble` |
+| `trade.backtest` | motor event-driven: exposición de i gana el retorno de i+1, costes por rotación |
+| `trade.metrics` | Sharpe/Sortino/CAGR/maxDD/Calmar/CVaR/skew/kurtosis, `summarize-pro` |
+| `trade.portfolio` | alineación por calendario UTC, agregación, paneles, `fold-verify` |
+| `trade.core` | CLI de backtest |
+
+## Verificación (el estándar del proyecto)
+
+- **fold-verify**: dividir en pliegues; en cada pliegue las señales se
+  recomputan solo con el prefijo (sin futuro) y se exige ganar a B&H en
+  Sharpe Y maxDD. "Gana siempre" = N/N pliegues.
+- **dev/robustness.clj**: bootstrap por bloques (P(Sharpe>0)) y jitter
+  de parámetros ±20% (no sobreajuste).
+- **Alineación por calendario**: los streams combinados viven en la
+  intersección de días UTC de todos los activos — nunca por índice.
+- Costes: taker 5 bps (futuros USDT-M), maker 2 bps; sensibilidad 10 bps.
+
+## Reglas
+
+- Código SIEMPRE en inglés.
+- `*warn-on-reflection*` a cero avisos; kernels primitivos.
+- `areduce` abarca el array COMPLETO (reducciones por fila = loop acotado).
+- Sin hints primitivos en >4 args; re-vincular con `(let [^long k k] ...)`.
+- Ninguna mejora entra al sistema sin pasar fold-verify; lo que pierde se
+  elimina, no se comenta.
+
+## Datos y comandos
 
 ```bash
-clojure -M:verify                # batería de verificación (causalidad, gradcheck, aprendizaje)
-clojure -M:run train             # entrena sobre data/tinyshakespeare.txt -> data/model.bin
-clojure -M:run generate --prompt "JULIET:" --tokens 300
-clojure -M dev/ref_compare.clj   # compara forward/backward contra referencia en doble precisión
+scripts/dl_klines.sh SYMBOL INTERVAL START_MS OUT.json   # paginado Binance
+clojure -M:backtest --assets BTCUSDT,ETHUSDT --interval 1d
+clojure -M dev/combined_portfolio.clj     # cartera diaria + pliegues
+clojure -M dev/intraday.clj               # sistema intradía + ensemble
+clojure -M dev/robustness.clj             # bootstrap + jitter
+clojure -M dev/xsmomentum.clj             # momentum cross-seccional
+clojure -M dev/individual_report.clj      # por activo vs B&H
 ```
 
-## Reglas del proyecto
-
-- Código SIEMPRE en inglés (nombres, docstrings, comentarios).
-- Los kernels numéricos viven en `llm.tensor` sobre `float[]` con bucles
-  primitivos; `*warn-on-reflection*` debe seguir a cero avisos.
-- `areduce` abarca el array COMPLETO — para reducciones por fila usar `loop`
-  acotado a `n` (ya hubo un bug por esto; no repetirlo).
-- Clojure no permite hints primitivos (`long`/`double`) en funciones de >4
-  argumentos: re-vincular dentro con `(let [^long k k] ...)`.
-- Los hints de retorno de vars de otros namespaces no se propagan de forma
-  fiable: re-vincular con `^floats` en el punto de uso.
-- Todo cambio en el backward debe pasar `clojure -M:verify` (el gradcheck
-  numérico elemento a elemento es la autoridad).
+Datos en `data/market/`: 20 criptos 1d, 1m (BTC/ETH 30 días, resto 5.5),
+1h (3 años), 1s (BTC/ETH 3000 barras), 11 stocks/ETFs Alpaca ajustados.

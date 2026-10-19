@@ -40,7 +40,7 @@
   (SMA fast>slow, SMA mid>anchor, price>anchor = absolute momentum),
   vol-targeted. Flat otherwise. Pure per-day function — the engine adds
   the execution lag."
-  [{:keys [closes f1 s1 mid anchor target-vol vol-window max-lev ppy]}]
+  [{:keys [closes f1 s1 mid target-vol vol-window max-lev ppy]}]
   (let [fv  (sma-vec-fast closes f1)
         sv  (sma-vec-fast closes s1)
         mv  (sma-vec-fast closes mid)
@@ -62,3 +62,39 @@
     (vec (map (fn [i] (when (>= i (dec n))
                         (/ (- (nth prefix (inc i)) (nth prefix (inc (- i n)))) (double n))))
               (range (count closes))))))
+
+(defn mr-zscore
+  "Intraday mean reversion with hysteresis (validated on the 1m crypto
+  portfolio in dev/intraday.clj). z is the k-bar cumulative log return
+  normalized by 1-bar realized vol times sqrt(k); while z < -threshold the
+  state goes long until z crosses back through zero. `side` :long-dip
+  (the winning portfolio configuration — dips mean-revert, pumps run,
+  stay flat otherwise) or :both to short extreme pumps as well.
+  Exposure vol-targeted; decided from past bars only."
+  [{:keys [closes k w threshold target-vol max-lev ppy side] :or {side :long-dip}}]
+  (let [n      (count closes)
+        ;; prefix sums of LOG RETURNS: the difference k entries apart is
+        ;; the k-bar cumulative log return log(P_i / P_{i-k})
+        lrets  (into [0.0] (map (fn [i] (- (Math/log (nth closes i))
+                                           (Math/log (nth closes (dec i)))))
+                                (range 1 n)))
+        prefix (reduce (fn [a x] (conj a (+ (peek a) x))) [0.0] lrets)
+        rets   (data/simple-returns closes)
+        tdv    (/ (double target-vol) (Math/sqrt (double ppy)))
+        sk     (Math/sqrt (double k))]
+    (loop [i 0, state 0.0, acc (transient [])]
+      (if (= i n)
+        (persistent! acc)
+        (let [rv (data/realized-vol rets i (long w))
+              z  (if (and (>= i k) rv (pos? rv))
+                   (/ (- (nth prefix (inc i)) (nth prefix (inc (- i k))))
+                      (* rv sk))
+                   0.0)
+              state (cond (= 0.0 state)
+                          (cond (< z (- (double threshold))) 1.0
+                                (and (= side :both) (> z (double threshold))) -1.0
+                                :else 0.0)
+                          (pos? state) (if (>= z 0.0) 0.0 1.0)
+                          :else        (if (<= z 0.0) 0.0 -1.0))
+              scale (if (and rv (pos? rv)) (min (/ tdv rv) (double max-lev)) 0.0)]
+          (recur (inc i) state (conj! acc (* state scale))))))))
