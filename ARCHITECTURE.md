@@ -1,93 +1,80 @@
-# Arquitectura del sistema de trading — contrato
+# Arquitectura — contrato del sistema
 
 ## Principio rector
 
-**Cada frontera tiene una sola responsabilidad, y la verdad tiene una
-sola fuente.** Cuatro capas, cero solapamiento:
+**Cada frontera, una responsabilidad. La verdad, una sola fuente.**
+Cinco capas; las dependencias apuntan en una sola dirección
+(brain → desk → cinta → recorder). Nada al revés.
 
 ```
-        UI (estática + WebSocket)         solo pinta; cero cálculo
-              ▲            │flatten
-   eventos venue-tagged    │
-              │            ▼
-        DESK (aiohttp, 1 proceso Python)
-        • broadcast WS · memoria SQLite (WAL)
-        • PASARELA: /order/{venue} firma con el SDK del venue
-        • VERDAD: /position/{venue} consulta el venue real
-        • registro VENUES: {id, módulo, cerebro}
-              ▲ órdenes + consultas        ▲ feeds del PROPIO venue
-        BRAIN (trade.live-clojure)
+CAPA 0  RECORDER (recorder.py + scripts/run/recorder.sh)
+        ÚNICO dueño de los WS de venues. Solo graba: cintas binarias
+        append-only. No conoce estrategia. Nunca muere (supervisor).
+
+CAPA 1  CINTAS (tape/) — la memoria cruda del mercado
+        Binario fijo: 12 B por print (sec u32 + px f64), 20 B por quote.
+        Rotación diaria. Conversión nocturna a Parquet (convert_tape.py)
+        para entrenamiento (5-10× más compacto, lectura columnar).
+
+CAPA 2  DESK (server.py + scripts/run/desk.sh)
+        • relé cinta/feeds → UI y cerebro (el cerebro JAMÁS toca el venue)
+        • pasarela de ejecución: /order/{venue} firma con el SDK oficial
+        • fuente de verdad: /position/{venue} consulta el venue real
+        • memoria de auditoría: SQLite WAL (velas, órdenes con contexto)
+        • registro VENUES: añadir exchange = adaptador + 1 línea
+
+CAPA 3  BRAIN (trade.live-clojure + scripts/run/brain.sh)
         • UNA señal para todos los venues: signals/mr-zscore (kaocha)
-        • UN feed por venue — su propia microestructura, nunca cruzada:
-            GRVT   → v1.trade + v1.mini.s + v1.book.s (L2)
-            Alpaca → CryptoTrades / velas 1m propias
-            Binance-v → trades de producción (su mercado real)
-        • UNA capa de riesgo: band-executor, throttle 2s,
-          spread gate 8 bps, presupuesto de errores + flatten,
-          reconciliación contra el venue cada 10 s
+        • datos del PROPIO venue por relé del desk (nunca cruzados)
+        • params del CAMPEÓN: live/champion.edn (EDN — formato nativo
+          Clojure para estado Clojure-interno)
+        • riesgo en una capa: band-executor, throttle 2 s, spread gate,
+          presupuesto de errores + flatten, reconciliación 10 s,
+          watchdog de silencio, intención persistida antes de la orden
+
+CAPA 4  UI (index.html, sin dependencias externas)
+        paneles por venue, métricas del servidor, flatten; solo pinta.
+
+CAPA 5  APRENDIZAJE EN CALIENTE (trade.learn-hot + scripts/run/learner)
+        • corpus inmediato: histórico real (20 criptos × 1 año 1m;
+          BTC/ETH 1s) — nunca parte de cero
+        • Monte Carlo continuo: bootstrap por bloques + amplificación
+          de vol sobre cintas frescas (escenarios ultrarrealistas)
+        • grid de la familia scalping con estabilidad de vecinos
+          (anti-sobreajuste: gana la config cuyo vecindario también gana)
+        • campeón → live/champion.edn → cerebro y motores lo recargan
 ```
 
-## Reglas derivadas (cada una nació de un fallo medido)
+## Decisión de formatos (regla: el formato lo decide el CONSUMIDOR)
 
-1. **Un cerebro decide para todos los venues** — la comparación entre
-   venues se convierte en experimento controlado: misma señal, distinta
-   microestructura → lo que difiere es ejecución pura. (Hoy: los
-   motores Python duplicaban la lógica — deriva de paridad garantizada.)
+| Dato | Consumidor | Formato |
+|---|---|---|
+| Cintas de prints/quotes (millones/día) | lectores binarios/ML | **binario fijo** 12-20 B/registro |
+| Órdenes + eventos de auditoría | humanos + multi-lenguaje | JSONL legible |
+| Config del campeón / estado cerebro | solo Clojure | **EDN** |
+| Dataset de entrenamiento nocturno | learners/ML | **Parquet** (zstd) |
+| WS hacia la UI | navegador | JSON (frontera) |
 
-2. **La señal vive en Clojure; la firma vive en Python.** La decisión es
-   `signals/mr-zscore` compilada — la misma función que los tests de
-   causalidad y los pliegues validaron. EIP-712 es detalle del broker:
-   la pasarela firma con los SDK oficiales, nunca a mano.
+## Decisión: ¿desk en Clojure? → Python, y por qué
 
-3. **El venue es la fuente de verdad.** Posición sembrada al arranque
-   desde `/position/{venue}`, reconciliada cada 10 s (6 req/min, margen
-   holgado bajo los límites). Divergencia detectada = el venue gana y se
-   registra.
+La firma de órdenes vive en los SDK oficiales (grvt-pysdk: EIP-712;
+alpaca-py) y son Python. Un desk Clojure seguiría llamando a Python en
+cada orden — movería la fontanería sin eliminar el segundo proceso.
+**Regla práctica: decide/mide/verifica → Clojure; firma/pinta → Python.**
 
-4. **Datos del venue donde se ejecuta.** El scalping opera la
-   microestructura contra la que se llena — decidir sobre Binance y
-   ejecutar en GRVT es pagar el spread de un libro que no viste.
+## Robustez (cada regla nació de un fallo medido)
 
-5. **Robustez en una capa**: intención persistida ANTES de la orden (un
-   crash deja una orden pendiente, nunca una doble), gap mínimo 2 s
-   entre órdenes, presupuesto de errores que aplana y para, watchdog de
-   silencio (90 s → reconnect), supervisor que relanza el brain.
+- Intención persistida ANTES de la orden (crash ⇒ orden pendiente, nunca doble)
+- Watchdog de silencio (90 s) + wrapper con bucle de re-arranque
+- Presupuesto de errores → flatten + parada (nunca operar roto)
+- Supervisores con lockfile (una sola instancia por pieza)
+- Reconciliación contra el venue cada 10 s; el venue SIEMPRE gana
+- Snapshot de GRVT (sequence_number "0") descartado siempre — inyecta
+  volumen pasado como presente (patrón de f-trader, medido)
 
-6. **Lo que pierde la medición se elimina** — fold-verify (Sharpe Y
-   maxDD vs B&H en N/N pliegues, sin futuro) es la puerta de entrada de
-   cualquier parámetro o mecánica; `dev/robustness.clj` (bootstrap por
-   bloques + jitter ±20%) es la puerta de la robustez.
+## Puerta de entrada de cualquier cambio
 
-## Estado de la consolidación
-
-| Pieza | Estado |
-|---|---|
-| Desk pasarela + UI + SQLite | ✅ operativo (3 venues visibles) |
-| Brain Clojure GRVT-nativo (L2 + spread gate) | ✅ escrito, compila |
-| Feed Alpaca en el brain | ⏳ pendiente (motor Python mientras tanto) |
-| Feed Binance-v en el brain | ⏳ pendiente (motor Python mientras tanto) |
-| Robustez Monte Carlo | ⏳ re-corrida en curso |
-| Supervisor systemd (desk + brain) | ⏳ pendiente |
-
-La transición es gradual y honesta: mientras un feed no vive en el
-brain, su venue lo opera el motor Python con `DipEngine` parametrizado —
-documentado aquí como deuda, no como silencio.
-
-## Decisión: ¿desk en Clojure o en Python? → Python, y por qué
-
-La pregunta se responde con una restricción física, no con preferencia:
-**la firma de órdenes vive en los SDK oficiales, y esos son Python**
-(grvt-pysdk para el EIP-712 de GRVT, alpaca-py para Alpaca). Un desk en
-Clojure seguiría necesitando el proceso Python en cada orden — movería
-la fontanería sin eliminar el segundo proceso, añadiendo un salto HTTP
-en el camino caliente.
-
-La maximización de Clojure ocurre donde paga: **todo lo que decide y
-mide ya es Clojure compilado** — señal (signals/mr-zscore), riesgo
-(band-executor, throttle), métricas (mark-to-market, Sharpe, maxDD),
-verificación (fold-verify, kaocha). La consolidación pendiente (feeds
-de Alpaca y Binance-v dentro del brain) reduce Python a firmante sin
-estado: sin estrategia, sin riesgo, sin memoria de decisión.
-
-Regla práctica del repo: **una nueva capacidad va a Clojure si decide,
-mide o verifica; va a Python si firma o pinta.**
+1. kaocha (`clojure -M:test`) — causalidad, costes, contratos
+2. fold-verify — Sharpe Y maxDD vs B&H en N/N pliegues, sin futuro
+3. robustez (`dev/robustness.clj`) — bootstrap por bloques + jitter ±20 %
+4. Solo lo que sobrevive las tres entra al sistema; lo demás se elimina.
