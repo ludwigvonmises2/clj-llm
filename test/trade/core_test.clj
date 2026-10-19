@@ -7,7 +7,9 @@
             [trade.data :as data]
             [trade.signals :as signals]
             [trade.backtest :as backtest]
-            [trade.portfolio :as portfolio]))
+            [trade.portfolio :as portfolio]
+            [trade.live :as trade.live]
+            [trade.learn :as trade.learn]))
 
 (defn- sine-series
   "Deterministic test series: geometric walk with a sine trend."
@@ -87,3 +89,53 @@
                                       (fn [x] (vec (concat [0.0] (repeat (dec (count x)) 1.0))))
                                       365 0.0 4 100 false)]
     (is (zero? w) "B&H vs B&H must tie, never win")))
+
+(deftest bar-builder-folds-ticks
+  (let [ticks [{:p 100.0 :t 1000 :q 1.0} {:p 105.0 :t 1999 :q 2.0}
+               {:p  98.0 :t 1400 :q 0.5} {:p 101.0 :t 2100 :q 1.0}]
+        bars  (trade.live/ticks->bars ticks 1000)]
+    (is (= 2 (count bars)) "two completed 1s windows")
+    (let [b (first bars)]
+      (is (= 1000 (:ts b)) "window start")
+      (is (= 100.0 (:o b)) (= 105.0 (:c b)))
+      (is (= 98.0 (:l b)) (= 105.0 (:h b)))
+      (is (< (Math/abs (- (:v b) 3.5)) 1e-9)))))
+
+(deftest live-parity-with-backtest
+  "THE honesty contract: the live rolling engine must decide exactly
+  what the causal backtest signal decides, once the window is full."
+  (let [c  (sine-series 1200)
+        sigfn (fn [x] (signals/mr-zscore {:closes x :k 60 :w 360 :threshold 3.0
+                                          :side :long-dip :target-vol 0.30
+                                          :max-lev 2.0 :ppy 525600}))
+        live (trade.live/live-sigs c 720 sigfn)
+        ref  (sigfn c)]
+    (is (= (subvec live 719) (subvec ref 719))
+        "live decisions diverge from the backtest signal")))
+
+(deftest band-executor-holds-through-noise
+  (let [targets [0.0 0.4 0.0 -0.3 1.0 1.2]
+        pos     (trade.live/band-executor targets 0.5)]
+    (is (= [0.0 0.0 0.0 0.0 1.0 1.0] pos)
+        "sub-band changes never reach the exchange")))
+
+(deftest learn-journal-and-promotion
+  (let [j (trade.learn/new-journal)]
+    (trade.learn/record-decision! j 1 0.5 0.001)
+    (trade.learn/record-decision! j 2 -0.3 -0.002)
+    (trade.learn/record-decision! j 3 0.2 0.003)
+    (let [s (trade.learn/decision-stats j 8760)]
+      (is (= 3 (:bars s)))
+      (is (< (Math/abs (- (:hit-rate s) (/ 2.0 3))) 1e-9))
+      (is (pos? (:sharpe s))))
+    (is (nil? (trade.learn/realized-slippage j)) "no fills yet -> nil")
+    (trade.learn/record-fill! j 1 :buy 100.0 100.05 1.0)
+    (trade.learn/record-fill! j 2 :sell 100.0 99.90 1.0)
+    (let [sl (trade.learn/realized-slippage j)]
+      (is (some? sl))
+      (is (< (Math/abs (- sl 7.5)) 0.01) "buy +5bps, sell +10bps -> mean 7.5bps"))))
+
+(deftest promote-requires-dominant-evidence
+  (is (true? (trade.learn/promote? 4 5)) "5>4 promotes")
+  (is (false? (trade.learn/promote? 5 5)) "tie keeps champion")
+  (is (false? (trade.learn/promote? 5 4))))
