@@ -185,8 +185,7 @@
   de 1 año). Escribe la sección :swing del champion."
   []
   (let [bars (json/parse-string (slurp "data/market/BTCUSDT_1m.json") true)
-        closes (mapv #(Double/parseDouble (str (:c %)))
-                     (take-last 50000 bars))
+        closes (->> bars (take-last 50000) parse-closes)
         configs (for [k [40 60 100] w [120 240 480] thr [2.2 3.0]]
                   {:k k :w w :threshold thr :ppy 525600 :tv 0.30})
         scored (doall
@@ -217,8 +216,9 @@
     (= "--1s" (first args))
     (let [path (or (second args) "data/market/BTCUSDT_1s.json")
           bars (json/parse-string (slurp path) true)
-          closes (mapv #(Double/parseDouble (str (:c %))) bars)
-          closes (subvec closes (max 0 (- (count closes) 200000)))]
+          closes (->> bars parse-closes
+                      (drop (max 0 (- (count bars) 200000)))
+                      vec)]
       (println "grid scalping 1s sobre" (count closes) "velas reales")
       (grid-1s closes))
     :else (apply main args)))

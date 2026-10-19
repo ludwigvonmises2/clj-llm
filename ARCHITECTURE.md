@@ -82,9 +82,15 @@ cada orden — movería la fontanería sin eliminar el segundo proceso.
 ## Robustez (cada regla nació de un fallo medido)
 
 - Intención persistida ANTES de la orden (crash ⇒ orden pendiente, nunca doble)
-- Watchdog de silencio (90 s) + wrapper con bucle de re-arranque
-- Presupuesto de errores → flatten + parada (nunca operar roto)
-- Supervisores con lockfile (una sola instancia por pieza)
+- Watchdog de silencio (90 s) + supervisor con lockfile flock (una instancia)
+- Handshake WS con límite duro (orTimeout 15 s): un deref bloqueante se cuelga en silencio
+- Flow control del cliente WS: demanda ALTA (4096) re-armada por mensaje —
+  pedir 1 a 1 ahoga al cliente con el burst inicial de history
+- Buffer de fragmentos: LEER antes de vaciar (vaciar antes de leer dejó
+  al cerebro sordo con el watchdog engañado)
+- Presupuesto de errores en la reconciliación: venue inalcanzable = nil ⇒
+  CONSERVAR la posición interna; jamás "reconciliar" hacia 0 un venue vivo
+- Solo lo que decide va en Clojure; test de frontera en kaocha lo obliga
 - Reconciliación contra el venue cada 10 s; el venue SIEMPRE gana
 - Snapshot de GRVT (sequence_number "0") descartado siempre — inyecta
   volumen pasado como presente (patrón de f-trader, medido)

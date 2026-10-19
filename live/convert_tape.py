@@ -10,11 +10,12 @@ TAPE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tape")
 PARQUET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parquet")
 
 def read_prints_bin(path):
+    """FORMATO ÚNICO de cinta: '<Id' intercalado little-endian, 12 B.
+    El mismo que escribe store.tape y lee trade.learn-hot."""
     raw = open(path, "rb").read()
-    n = len(raw) // 12
-    secs = struct.unpack_from(f"<{n}I", raw, 0)
-    pxs = struct.unpack_from(f"<{n}d", raw, 4)
-    return pd.DataFrame({"ts": secs, "px": pxs})
+    rows = list(struct.iter_unpack("<Id", raw[:len(raw) - len(raw) % 12]))
+    return pd.DataFrame({"ts": [r[0] for r in rows],
+                         "px": [r[1] for r in rows]})
 
 def main():
     days = sys.argv[1:] or [time.strftime("%Y%m%d", time.gmtime(-86400)),

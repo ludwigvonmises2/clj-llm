@@ -2,7 +2,7 @@
 """Desk memory: SQLite (WAL) — bars, orders and events persist across
 restarts, and a freshly connected dashboard replays the session so far.
 stdlib sqlite3 only; one connection per writer thread."""
-import sqlite3, os, time, threading, json, glob
+import sqlite3, os, time, threading, json, glob, struct
 
 DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "desk.db")
 _local = threading.local()
@@ -40,7 +40,7 @@ def bar(venue, ts, close, target, z, position, state):
 def order(venue, ts, side, qty, price, resp="", z=None, target=None,
           spread=None, why=""):
     conn().execute(
-        "INSERT INTO orders VALUES (?,?,?,?,?,COALESCE(?, ''),?,?,?,?,?)",
+        "INSERT INTO orders VALUES (?,?,?,?,?,COALESCE(?, ''),?,?,?,?)",
         (int(ts), venue, side, qty, price, str(resp)[:200],
          z, target, spread, str(why)[:60]))
     conn().commit()
@@ -72,10 +72,22 @@ init()
 TAPE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tape")
 
 def tape(venue, obj):
-    """Cinta append-only del venue: un JSON por print/quote, rotación
-    diaria. Es la materia prima de la reproducibilidad: re-ejecutar el
-    cerebro sobre esta cinta debe reproducir las mismas decisiones."""
+    """Cinta append-only BINARIA del venue (rotación diaria, UTC):
+    print  -> <day>_<venue>.prints  12 B/registro  struct '<Id' (sec u32, px f64)
+    quote  -> <day>_<venue>.quotes  20 B/registro  struct '<Idd' (sec, bid, ask)
+    Un solo formato en todo el sistema: recorder escribe, convert_tape
+    (Parquet) y trade.learn-hot (Clojure) leen lo mismo. Materia prima
+    de la reproducibilidad: re-ejecutar el cerebro sobre la cinta debe
+    reproducir las mismas decisiones."""
     os.makedirs(TAPE_DIR, exist_ok=True)
     day = time.strftime("%Y%m%d", time.gmtime())
-    with open(os.path.join(TAPE_DIR, f"{day}_{venue}.jsonl"), "a") as f:
-        f.write(json.dumps(obj, default=str) + "\n")
+    t = obj.get("type")
+    if t == "quote":
+        path = os.path.join(TAPE_DIR, f"{day}_{venue}.quotes")
+        with open(path, "ab") as f:
+            f.write(struct.pack("<Idd", int(obj["sec"]),
+                                float(obj["bid"]), float(obj["ask"])))
+    else:
+        path = os.path.join(TAPE_DIR, f"{day}_{venue}.prints")
+        with open(path, "ab") as f:
+            f.write(struct.pack("<Id", int(obj["sec"]), float(obj["px"])))

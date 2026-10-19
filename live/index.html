@@ -1,284 +1,811 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mr-dip · live comparison</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
+<meta name="color-scheme" content="dark">
+<title>mr-dip · mesa en vivo</title>
 <script src="/lib.charts.js"></script>
 <style>
   :root{
-    --ink:#0b0e14;--panel:#10141d;--line:#222939;--line2:#2c3448;
+    --ink:#0b0e14;--panel:#10141d;
+    --line:#222939;--line2:#2c3448;
     --text:#cdd6e6;--mut:#6d7a92;--mut2:#49536a;
     --amber:#e5a63c;--steel:#7fa6c9;--up:#3fae7c;--down:#c75146;
-    --mono:"Spline Sans Mono",monospace;--sans:"Instrument Sans",sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;
   }
-  *{box-sizing:border-box;margin:0}
+  *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
-  body{background:var(--ink);color:var(--text);font:14px/1.45 var(--sans);
-       display:grid;grid-template-rows:auto 1fr auto;overflow:hidden}
-  button{font-family:var(--sans);cursor:pointer}
-  button:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
+  body{background:var(--ink);color:var(--text);font:12px/1.4 var(--mono);
+       display:flex;flex-direction:column;overflow:hidden}
+  button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+  button:focus-visible{outline:1px solid var(--amber);outline-offset:1px}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;font-weight:400;color:var(--mut2);font-size:10px;padding:0 10px 3px 0}
+  td{padding:1.5px 10px 1.5px 0;font-size:11px;white-space:nowrap;vertical-align:top;font-variant-numeric:tabular-nums}
+  .buy{color:var(--up)} .sell{color:var(--down)}
+  .up{color:var(--up)} .dn{color:var(--down)}
+  .cv{color:var(--mut)} .empty{color:var(--mut2)}
 
-  header{display:flex;align-items:center;gap:16px;padding:10px 20px;border-bottom:1px solid var(--line)}
-  .brand{font-size:15px;font-weight:600;white-space:nowrap}
-  .brand i{color:var(--amber);font-style:normal;margin:0 2px}
-  .sub{font:11px var(--mono);color:var(--mut)}
+  /* ---- header: rail de estado ---- */
+  header{display:flex;align-items:center;gap:14px;padding:8px 14px;
+         border-bottom:1px solid var(--line);flex:none;flex-wrap:wrap}
+  .brand{font-size:13.5px;font-weight:700;white-space:nowrap}
+  .brand i{color:var(--amber);font-style:normal}
+  .champ{font-size:10.5px;color:var(--mut);border:1px solid var(--line);
+         padding:2px 8px;border-radius:2px;white-space:nowrap}
   .spacer{flex:1}
-  #clock{font:12px var(--mono);color:var(--mut)}
-  #conn{font:11px var(--mono);display:flex;align-items:center;gap:6px;color:var(--mut)}
-  .dot{width:7px;height:7px;border-radius:50%;background:var(--down)}
+  #totpnl{display:flex;align-items:baseline;gap:8px}
+  #totpnl .l{font-size:10px;color:var(--mut)}
+  #totpnl .v{font-size:15px;font-variant-numeric:tabular-nums}
+  #pills{display:flex;gap:6px}
+  .pill{font-size:10.5px;color:var(--mut);border:1px solid var(--line2);
+        padding:2px 7px;border-radius:2px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .pill.ok{color:var(--up);border-color:#2c4a3d}
+  .pill.warn{color:var(--amber);border-color:#57431f}
+  .pill.bad{color:var(--down);border-color:#5a2d28}
+  #conn{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--mut)}
+  #conn .dot{width:7px;height:7px;border-radius:50%;background:var(--down)}
   #conn.on .dot{background:var(--up)}
+  #clock{font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums}
 
-  main{display:grid;grid-template-columns:repeat(var(--n,2),1fr);min-height:0}
-  .panel{display:grid;grid-template-rows:auto auto 1fr;min-width:0;min-height:0;
-         border-right:1px solid var(--line);background:var(--ink)}
-  .panel:last-child{border-right:0}
-  .phead{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line)}
-  .phead .name{font-weight:600;font-size:13.5px}
-  .phead .inst{font:11px var(--mono);color:var(--mut)}
-  .phead .state{font:11px var(--mono);padding:2px 8px;border-radius:3px;border:1px solid var(--line2);color:var(--mut)}
-  .phead .state.long{color:var(--up);border-color:var(--up)}
-  .phead .state.short{color:var(--down);border-color:var(--down)}
-  .flat{margin-left:auto;background:color-mix(in srgb,var(--down) 14%,var(--ink));
-        color:var(--down);border:1px solid var(--down);font-size:11.5px;font-weight:600;
-        padding:4px 12px;border-radius:3px}
-  .flat:hover{background:color-mix(in srgb,var(--down) 28%,var(--ink))}
-  .pmetrics{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:8px 16px;
-            border-bottom:1px solid var(--line);background:var(--panel)}
-  .m .v{font:15px var(--mono);font-variant-numeric:tabular-nums}
-  .m .l{font-size:10px;color:var(--mut)}
-  .pos .v{color:var(--up)} .neg .v{color:var(--down)}
-  .pchart{position:relative;min-height:0}
+  /* ---- mesa: costuras de 1px entre celdas ---- */
+  #desk{flex:1;min-height:0;display:flex;flex-direction:column}
+  #traded-grid{flex:1.6;min-height:0;display:grid;gap:1px;background:var(--line);
+               grid-template-columns:repeat(auto-fit,minmax(430px,1fr));
+               grid-auto-rows:1fr;border-bottom:1px solid var(--line)}
+  #data-strip{flex:none;display:grid;gap:1px;background:var(--line);
+              grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+              border-bottom:1px solid var(--line)}
+  #bottom{flex:none;height:188px;display:grid;grid-template-columns:1fr 1.35fr 1fr;
+          gap:1px;background:var(--line)}
+
+  /* ---- panel de venue operada ---- */
+  .panel{background:var(--ink);display:flex;flex-direction:column;min-width:0;min-height:0}
+  .phead{display:flex;align-items:center;gap:10px;padding:7px 12px;
+         border-bottom:1px solid var(--line);flex:none}
+  .pname{font-size:13px;font-weight:700;white-space:nowrap}
+  .pinst{font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .state{font-size:10px;padding:1px 7px;border:1px solid var(--line2);border-radius:2px;
+         color:var(--mut);letter-spacing:.04em;white-space:nowrap}
+  .state.long{color:var(--up);border-color:var(--up)}
+  .state.short{color:var(--down);border-color:var(--down)}
+  .state.kill{color:var(--down);border-color:var(--down);
+              background:color-mix(in srgb,var(--down) 16%,transparent)}
+  .warm{flex:1;font-size:10px;color:var(--mut2);text-align:right;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap}
+  .flatbtn{font-size:10.5px;font-weight:600;color:var(--down);border:1px solid var(--down);
+           padding:2px 10px;border-radius:2px;white-space:nowrap;
+           background:color-mix(in srgb,var(--down) 10%,transparent)}
+  .flatbtn.armed{background:var(--down);color:var(--ink)}
+  .flatbtn:disabled{opacity:.5;cursor:default}
+  .pchart{position:relative;flex:1;min-height:110px}
   .pchart .c{position:absolute;inset:0}
-  .pchart .warm{position:absolute;bottom:8px;left:12px;font:10.5px var(--mono);color:var(--mut2);pointer-events:none}
+  .chartmsg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+            color:var(--mut2);font-size:11px;pointer-events:none}
+  .pmets{flex:none;display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+         background:var(--line);border-top:1px solid var(--line)}
+  .pmets .m{background:var(--panel);padding:5px 10px 4px;min-width:0}
+  .pmets .v{font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap;
+            overflow:hidden;text-overflow:ellipsis}
+  .pmets .l{font-size:9.5px;color:var(--mut)}
+  .pmets .m.pos .v{color:var(--up)}
+  .pmets .m.neg .v{color:var(--down)}
 
-  footer{display:flex;gap:20px;padding:7px 20px;border-top:1px solid var(--line);
-         font:11.5px var(--mono);color:var(--mut);flex-wrap:wrap}
-  footer b{color:var(--text);font-weight:500}
-  #feedwrap{display:none}
+  /* ---- tarjeta de venue de datos ---- */
+  .dcard{background:var(--ink);min-width:0;display:flex;flex-direction:column}
+  .dhead{display:flex;align-items:baseline;justify-content:space-between;gap:8px;
+         padding:5px 10px 3px;border-bottom:1px solid var(--line)}
+  .dname{font-size:12px;font-weight:700;white-space:nowrap}
+  .drate{font-size:10px;color:var(--mut);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .drows{padding:3px 0 5px}
+  .drow{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;
+        align-items:baseline;padding:1.5px 10px;font-variant-numeric:tabular-nums}
+  .drow .a{font-size:10.5px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .drow .px{font-size:12px;text-align:right}
+  .drow .spr{font-size:10px;color:var(--mut2);min-width:52px;text-align:right}
+  .drow.f-up{background:color-mix(in srgb,var(--up) 10%,transparent)}
+  .drow.f-up .px{color:var(--up)}
+  .drow.f-dn{background:color-mix(in srgb,var(--down) 10%,transparent)}
+  .drow.f-dn .px{color:var(--down)}
+
+  /* ---- franja inferior: órdenes / trades / avisos ---- */
+  .bt{background:var(--panel);display:flex;flex-direction:column;min-width:0;overflow:hidden}
+  .bt h2{flex:none;font-size:10px;font-weight:400;color:var(--mut2);
+         padding:6px 12px 4px;border-bottom:1px solid var(--line);
+         display:flex;justify-content:space-between;gap:10px}
+  .bt .scroll{flex:1;overflow:auto;padding:5px 12px}
+  td.why{color:var(--mut);max-width:180px;overflow:hidden;text-overflow:ellipsis}
+  #notices{list-style:none}
+  #notices li{font-size:10.5px;padding:1px 0;display:flex;gap:8px;
+              white-space:nowrap;overflow:hidden}
+  #notices time{color:var(--mut2);flex:none}
+  #notices b{font-weight:400;color:var(--mut);flex:none}
+  #notices span{overflow:hidden;text-overflow:ellipsis}
+  #notices .n-error span,#notices .n-kill span{color:var(--down)}
+  .scroll::-webkit-scrollbar{width:8px;height:8px}
+  .scroll::-webkit-scrollbar-thumb{background:var(--line2)}
+  .scroll::-webkit-scrollbar-track{background:transparent}
+
   #toast{position:fixed;bottom:44px;left:50%;transform:translateX(-50%) translateY(20px);
          background:var(--panel);border:1px solid var(--line2);color:var(--text);
-         font:12.5px var(--sans);padding:9px 16px;border-radius:4px;opacity:0;
+         font:12.5px var(--mono);padding:9px 16px;border-radius:3px;opacity:0;
          transition:opacity .18s,transform .18s;pointer-events:none;z-index:9}
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+  /* ---- responsive ---- */
+  @media (max-width:1180px){
+    #traded-grid{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+    #bottom{grid-template-columns:1fr 1.3fr}
+    #bt-notices{grid-column:1/-1;border-top:1px solid var(--line)}
+  }
+  @media (max-width:900px){
+    body{overflow:auto;height:auto;min-height:100%}
+    #traded-grid{grid-template-columns:1fr;grid-auto-rows:auto}
+    .panel{min-height:300px}
+    #data-strip{grid-template-columns:repeat(2,1fr)}
+    #bottom{height:auto;grid-template-columns:1fr}
+    .bt{max-height:210px}
+  }
 </style>
 </head>
 <body>
 <header>
-  <div class="brand">mr-dip<i>/</i>live</div>
-  <div class="sub">señal mr-dip · velas 1s desde ticks · z&lt;−3 entra · z≥0 sale · vol 30%</div>
+  <div class="brand">mr-dip<i>/</i>mesa</div>
+  <div class="champ">champion: scalp+swing recargable</div>
   <div class="spacer"></div>
+  <div id="totpnl"><span class="l">P&amp;L total $</span><span class="v" id="totpnl-v">—</span></div>
+  <div id="pills">
+    <span class="pill" id="pill-feed">feed —</span>
+    <span class="pill" id="pill-bar">velas —</span>
+    <span class="pill" id="pill-brain">cerebro —</span>
+  </div>
+  <div id="conn"><span class="dot"></span><span id="conn-t">conectando</span></div>
   <div id="clock">--:--:--</div>
-  <div id="conn"><span class="dot"></span>conectando</div>
 </header>
-<main id="panels"></main>
-<section style="border-top:1px solid var(--line);background:var(--panel);display:grid;
-      grid-template-columns:1fr 1fr;gap:0;max-height:170px;overflow:hidden">
-  <div style="border-right:1px solid var(--line);overflow-y:auto;padding:10px 16px">
-    <h2 style="font-size:10px;color:var(--mut2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px">Órdenes abiertas (venue)</h2>
-    <table style="width:100%;border-collapse:collapse;font:11px var(--mono);color:var(--text)">
-      <thead><tr><th style="text-align:left;color:var(--mut2);font-weight:400">venue</th><th style="text-align:left;color:var(--mut2);font-weight:400">símbolo</th><th style="text-align:left;color:var(--mut2);font-weight:400">lado</th><th style="text-align:left;color:var(--mut2);font-weight:400">qty</th></tr></thead>
-      <tbody id="oo"><tr><td colspan="4" style="color:var(--mut2)">—</td></tr></tbody>
-    </table>
-  </div>
-  <div style="overflow-y:auto;padding:10px 16px">
-    <h2 style="font-size:10px;color:var(--mut2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px">Trades históricos (venue)</h2>
-    <table style="width:100%;border-collapse:collapse;font:11px var(--mono);color:var(--text)">
-      <thead><tr><th style="text-align:left;color:var(--mut2);font-weight:400">hora</th><th style="text-align:left;color:var(--mut2);font-weight:400">venue</th><th style="text-align:left;color:var(--mut2);font-weight:400">lado</th><th style="text-align:left;color:var(--mut2);font-weight:400">qty</th></tr></thead>
-      <tbody id="th"></tbody>
-    </table>
-  </div>
-</section>
-<footer>
-  <div>venues <b id="f-venues">—</b></div>
-  <div>órdenes reales <b>papel/testnet</b></div>
-  <div>paridad <b>señal = backtest (kaocha)</b></div>
-  <div style="margin-left:auto"><b id="f-ev">0</b> eventos · <b id="f-err">0</b> errores</div>
-</footer>
-<div id="toast"></div>
+
+<main id="desk">
+  <section id="traded-grid" aria-label="venues operadas"></section>
+  <section id="data-strip" aria-label="venues de datos"></section>
+  <section id="bottom">
+    <div class="bt" id="bt-orders">
+      <h2>órdenes abiertas</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>venue</th><th>símbolo</th><th>lado</th><th>qty</th><th>px</th></tr></thead>
+          <tbody id="oo"><tr><td colspan="5" class="empty">sin órdenes abiertas</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="bt" id="bt-trades">
+      <h2>trades recientes</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>hora</th><th>venue</th><th>lado</th><th>qty</th><th>px</th><th>motivo</th></tr></thead>
+          <tbody id="th"><tr><td colspan="6" class="empty">sin trades aún</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="bt" id="bt-notices">
+      <h2>avisos <span id="counters">0 ev · 0 err</span></h2>
+      <div class="scroll"><ul id="notices"></ul></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" role="status"></div>
+<noscript><div style="padding:20px;color:#c75146">esta mesa requiere JavaScript</div></noscript>
 
 <script>
+'use strict';
+/* ============ utilidades ============ */
 const $ = id => document.getElementById(id);
-const toast = m => { const t=$('toast'); t.textContent=m; t.classList.add('show');
-  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2600); };
-setInterval(()=>$('clock').textContent=new Date().toISOString().slice(11,19)+' UTC',1000);
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const nowMs = () => performance.now();
+const fmtPx = v => {
+  if (!isFinite(v)) return '—';
+  const a = Math.abs(v);
+  if (a >= 1000) return v.toLocaleString('en-US',{minimumFractionDigits:1,maximumFractionDigits:2});
+  return a >= 10 ? v.toFixed(2) : v.toFixed(4);
+};
+const fmtQ = v => isFinite(+v) ? (+v).toFixed(4) : '—';
+const cssId = s => String(s).replace(/[^a-zA-Z0-9_-]/g,'_');
 
-const VENUES = {};   // id -> {label, chart, candles, eq, dom, dirty, meta}
-let errors = 0, events = 0;
+let events = 0, errors = 0;
+const venues = new Map();      // id -> V
+const liveTrades = [];         // fills llegados por WS, más nuevo primero
+let tradesDirty = false, lastTradeRender = 0;
 
-function makePanel(v) {
-  const p = document.createElement('div'); p.className = 'panel';
+/* ============ clasificación dinámica de venues ============
+   Sin listas fijas: una venue es "operada" si el API la declara así,
+   si tiene posición u órdenes, o en cuanto llega un evento del cerebro
+   (bar/metrics/order/history) que la promueve de tarjeta a panel.   */
+function initialRole(v){
+  if (v.role === 'data' || v.kind === 'data') return 'data';
+  if (v.role === 'traded' || v.kind === 'traded' || v.traded === true) return 'traded';
+  if ((+v.position || 0) !== 0) return 'traded';
+  if (Array.isArray(v.orders) ? v.orders.length > 0 : (+v.orders > 0)) return 'traded';
+  return 'data';
+}
+
+function register(v){
+  if (!v || !v.id) return null;
+  let V = venues.get(v.id);
+  if (V){
+    if (v.label && V.label !== v.label){
+      V.label = v.label;
+      if (V.els.name) V.els.name.textContent = v.label;
+    }
+    if (v.instrument && V.instrument !== v.instrument){
+      V.instrument = v.instrument;
+      if (V.els.inst) V.els.inst.textContent = v.instrument;
+    }
+    if (v.position != null && (+v.position || 0) !== V.pos){
+      V.pos = +v.position || 0; refreshPos(V); refreshState(V);
+    }
+    if (V.role === 'data' && initialRole(v) === 'traded') promote(V);
+    return V;
+  }
+  V = {
+    id:v.id, label:v.label || v.id, instrument:v.instrument || '',
+    role:initialRole(v), pos:+v.position || 0, posLive:null, target:null,
+    pnl:null, kill:false, lastBarAt:0,
+    candles:[], targets:[], dirty:false, entry:null,
+    chart:null, series:null, tseries:null,
+    cells:{}, els:{}, live:{}, assets:new Map(),
+    printCount:0, rate:0, rateAt:nowMs(), _orders:null, _trades:null,
+  };
+  venues.set(v.id, V);
+  if (V.role === 'traded') buildPanel(V); else buildCard(V);
+  refreshPos(V); refreshState(V);
+  return V;
+}
+
+function promote(V){
+  if (!V || V.role === 'traded') return;
+  V.role = 'traded';
+  if (V.els.card) V.els.card.remove();
+  V.assets.clear();
+  buildPanel(V);
+  refreshPos(V); refreshState(V);
+}
+
+/* resuelve "venue:asset" -> venue base + etiqueta de activo */
+function resolve(name, create){
+  const full = String(name || '');
+  const i = full.indexOf(':');
+  const base = i < 0 ? full : full.slice(0, i);
+  let V = venues.get(full) || venues.get(base);
+  if (!V && create && base) V = register({id:base, label:base});
+  return { V, tag: i < 0 ? null : full.slice(i + 1) };
+}
+
+/* ============ panel de venue operada ============ */
+const METRICS = [['pos','posición'],['pnl','P&L $ (mtm)'],['sh','sharpe 1s'],['hit','aciertos'],
+                 ['dd','maxDD'],['px','últ. precio'],['spr','spread'],['z','z']];
+
+function makeChart(host, setMsg){
+  if (typeof LightweightCharts === 'undefined'){
+    setMsg('lib. de velas no disponible (/lib.charts.js)');
+    return null;
+  }
+  const api = LightweightCharts.createChart(host, {
+    layout:{background:{color:'#0b0e14'},textColor:'#6d7a92',
+            fontFamily:'ui-monospace,Menlo,monospace',fontSize:10},
+    grid:{vertLines:{color:'#141926'},horzLines:{color:'#141926'}},
+    timeScale:{timeVisible:true,secondsVisible:true,borderColor:'#222939',rightOffset:4},
+    rightPriceScale:{borderColor:'#222939'},
+    crosshair:{mode:0},
+  });
+  const candles = api.addCandlestickSeries({upColor:'#3fae7c',downColor:'#c75146',
+    borderVisible:false,wickUpColor:'#3fae7c',wickDownColor:'#c75146'});
+  const target = api.addLineSeries({color:'#e5a63c',lineWidth:1,priceScaleId:'tgt',
+    lastValueVisible:false,priceLineVisible:false,crosshairMarkerVisible:false});
+  api.priceScale('tgt').applyOptions({scaleMargins:{top:.86,bottom:0}});
+  return {api, candles, target};
+}
+
+function buildPanel(V){
+  const p = document.createElement('article');
+  p.className = 'panel'; p.id = 'p-' + cssId(V.id);
   p.innerHTML = `
     <div class="phead">
-      <span class="name">${v.label}</span>
-      <span class="inst">${v.instrument || '…'}</span>
+      <span class="pname">${esc(V.label)}</span>
+      <span class="pinst">${esc(V.instrument || '')}</span>
       <span class="state">flat</span>
-      <button class="flat">flatten</button>
+      <span class="warm"></span>
+      <button class="flatbtn" type="button">flatten</button>
     </div>
-    <div class="pmetrics">
-      <div class="m"><div class="v" data-k="pos">0.0000</div><div class="l">posición</div></div>
-      <div class="m"><div class="v" data-k="pnl">0.00</div><div class="l">P&L $ (mtm)</div></div>
-      <div class="m"><div class="v" data-k="sh">—</div><div class="l">sharpe 1s</div></div>
-      <div class="m"><div class="v" data-k="hit">—</div><div class="l">hit-rate</div></div>
-      <div class="m"><div class="v" data-k="dd">0.00%</div><div class="l">maxDD</div></div>
-      <div class="m"><div class="v" data-k="px">—</div><div class="l">últ. precio</div></div>
-    </div>
-    <div class="pchart"><div class="c"></div><div class="warm">precargando historia…</div></div>`;
-  $('panels').appendChild(p);
-  const chart = LightweightCharts.createChart(p.querySelector('.c'), {
-    layout:{background:{color:'#0b0e14'},textColor:'#6d7a92',fontFamily:'Spline Sans Mono',fontSize:10},
-    grid:{vertLines:{color:'#141926'},horzLines:{color:'#141926'}},
-    timeScale:{timeVisible:true,secondsVisible:true,borderColor:'#222939'},
-    rightPriceScale:{borderColor:'#222939'}, crosshair:{mode:0},
+    <div class="pchart"><div class="c"></div><div class="chartmsg"></div></div>
+    <div class="pmets">
+      ${METRICS.map(([k,l]) =>
+        `<div class="m"><div class="v" data-k="${k}">—</div><div class="l">${l}</div></div>`).join('')}
+    </div>`;
+  $('traded-grid').appendChild(p);
+
+  V.cells = {};
+  p.querySelectorAll('[data-k]').forEach(el => { V.cells[el.dataset.k] = el; });
+  V.els = Object.assign(V.els, {
+    card:p, name:p.querySelector('.pname'), inst:p.querySelector('.pinst'),
+    state:p.querySelector('.state'), warm:p.querySelector('.warm'),
+    flat:p.querySelector('.flatbtn'),
   });
-  const candles = chart.addCandlestickSeries({upColor:'#3fae7c',downColor:'#c75146',
-    borderVisible:false,wickUpColor:'#3fae7c',wickDownColor:'#c75146'});
-  const eq = chart.addLineSeries({color:'#e5a63c',lineWidth:1,priceScaleId:'eq',lastValueVisible:false});
-  chart.priceScale('eq').applyOptions({scaleMargins:{top:.85,bottom:0}});
-  const fit = () => chart.applyOptions({width:p.querySelector('.c').clientWidth,
-                                        height:p.querySelector('.c').clientHeight});
-  new ResizeObserver(fit).observe(p.querySelector('.c')); fit();
-  p.querySelector('.flat').onclick = async () => {
-    const r = await fetch('/flatten/'+v.id, {method:'POST'});
-    toast((await r.json()).msg);
-  };
-  const cells = {};
-  p.querySelectorAll('[data-k]').forEach(el => cells[el.dataset.k] = el);
-  return { chart, candles, eq, cells,
-    els:{ state:p.querySelector('.state'), inst:p.querySelector('.inst'),
-          warm:p.querySelector('.warm') },
-    candles_data:[], eq_data:[], dirty:false, metaDirty:false,
-    setPos:{price:null,line:null} };
+
+  const host = p.querySelector('.c');
+  V.chart = makeChart(host, msg => { p.querySelector('.chartmsg').textContent = msg; });
+  if (V.chart){
+    V.series = V.chart.candles; V.tseries = V.chart.target;
+    const fit = () => V.chart.api.applyOptions({width:host.clientWidth, height:host.clientHeight});
+    new ResizeObserver(fit).observe(host); fit();
+  } else { V.series = null; V.tseries = null; }
+
+  // flatten en dos pasos: armar y confirmar
+  const b = V.els.flat;
+  let armT = null;
+  const disarm = () => { b.classList.remove('armed'); b.textContent = 'flatten'; };
+  b.addEventListener('click', () => {
+    if (b.classList.contains('armed')){ clearTimeout(armT); disarm(); postFlatten(V); }
+    else { b.classList.add('armed'); b.textContent = '¿aplanar?'; armT = setTimeout(disarm, 3000); }
+  });
+
+  V.dirty = true; // setData inicial con lo que haya
 }
 
-fetch('/api/venues').then(r=>r.json()).then(vs => {
-  document.documentElement.style.setProperty('--n', vs.length);
-  for (const v of vs) {
-    VENUES[v.id] = Object.assign(makePanel(v), v, {position:v.position||0});
-    $('f-venues').textContent = ( $('f-venues').textContent ? $('f-venues').textContent+' · ' : '' ) + v.label;
-  }
-  connect();
-});
+async function postFlatten(V){
+  const b = V.els.flat;
+  b.disabled = true;
+  try{
+    const r = await fetch('/flatten/' + encodeURIComponent(V.id), {method:'POST'});
+    let m = 'flatten enviado';
+    try{ const j = await r.json(); if (j && j.msg) m = j.msg; }catch(_){}
+    toast(V.label + ': ' + m);
+  }catch(_){ toast(V.label + ': fallo al aplanar'); }
+  b.disabled = false;
+}
 
-/* ---- sensible realtime: single rAF repaint, dirty flags ---- */
-function paint() {
-  for (const id in VENUES) {
-    const V = VENUES[id];
-    if (V.dirty) {
-      V.candles.setData(V.candles_data);
-      V.eq.setData(V.eq_data);
+/* ============ tarjeta de venue de datos ============ */
+function buildCard(V){
+  const c = document.createElement('article');
+  c.className = 'dcard'; c.id = 'd-' + cssId(V.id);
+  c.innerHTML = `
+    <div class="dhead"><span class="dname">${esc(V.label)}</span><span class="drate">0 p/s</span></div>
+    <div class="drows"></div>`;
+  $('data-strip').appendChild(c);
+  V.els = Object.assign(V.els, {
+    card:c, rate:c.querySelector('.drate'), rows:c.querySelector('.drows'),
+  });
+}
+
+const MAX_ASSET_ROWS = 12;
+function ensureAsset(V, tag){
+  let a = V.assets.get(tag);
+  if (a) return a;
+  a = {tag, px:null, dir:0, flash:0, bid:null, ask:null, lastP:null, lastS:null, lastCl:'', row:null};
+  if (V.assets.size < MAX_ASSET_ROWS && V.els.rows){
+    const row = document.createElement('div');
+    row.className = 'drow';
+    row.innerHTML = `<span class="a">${esc(tag.toUpperCase())}</span>` +
+                    `<span class="px">—</span><span class="spr">—</span>`;
+    V.els.rows.appendChild(row);
+    a.row = {root:row, px:row.children[1], spr:row.children[2]};
+  }
+  V.assets.set(tag, a);
+  return a;
+}
+
+/* ============ celdas con guarda de cambio ============ */
+function setCell(V, k, txt){
+  const c = V.cells[k];
+  if (!c) return;
+  if (V.live[k] !== txt){ V.live[k] = txt; c.textContent = txt; }
+}
+
+function refreshPos(V){
+  if (V.role !== 'traded') return;
+  const p = V.posLive != null ? V.posLive : V.pos;
+  setCell(V, 'pos', fmtQ(p));
+  const c = V.cells.pos;
+  if (c) c.parentElement.className = 'm ' + (p > 0 ? 'pos' : p < 0 ? 'neg' : '');
+}
+
+function refreshState(V){
+  if (!V.els.state) return;
+  let s = 0;
+  if (V.target != null && isFinite(V.target) && V.target !== 0) s = Math.sign(V.target);
+  else {
+    const p = V.posLive != null ? V.posLive : V.pos;
+    if (p) s = Math.sign(p);
+  }
+  const t = V.kill ? 'kill' : s > 0 ? 'LONG' : s < 0 ? 'SHORT' : 'flat';
+  if (V._stateTxt !== t){
+    V._stateTxt = t;
+    V.els.state.textContent = t;
+    V.els.state.className = 'state' +
+      (t === 'LONG' ? ' long' : t === 'SHORT' ? ' short' : t === 'kill' ? ' kill' : '');
+  }
+}
+
+function refreshTotal(){
+  let s = 0, any = false;
+  for (const V of venues.values()) if (V.pnl != null){ s += V.pnl; any = true; }
+  const el = $('totpnl-v');
+  const txt = any ? (s >= 0 ? '+' : '') + s.toFixed(2) : '—';
+  if (el._t !== txt){
+    el._t = txt; el.textContent = txt;
+    el.className = 'v ' + (any ? (s >= 0 ? 'up' : 'dn') : '');
+  }
+}
+
+/* ============ velas 1s ============ */
+function addCandle(V, tms, px){
+  if (!isFinite(px)) return;
+  const sec = Math.floor(tms / 1000);
+  const arr = V.candles;
+  let last = arr[arr.length - 1];
+  if (last && last.time === sec){
+    last.close = px;
+    if (px > last.high) last.high = px;
+    if (px < last.low) last.low = px;
+  } else {
+    last = {time:sec, open:px, high:px, low:px, close:px};
+    arr.push(last);
+    if (arr.length > 3600) arr.splice(0, 600);
+  }
+  if (V.series){ try{ V.series.update(last); }catch(_){} }
+}
+
+/* ============ manejadores de eventos WS ============ */
+function onPrint(ev){
+  const {V, tag} = resolve(ev.venue, true);
+  if (!V) return;
+  const px = +ev.px;
+  if (!isFinite(px)) return;
+  const tms = (ev.sec != null ? +ev.sec : Math.floor(Date.now() / 1000)) * 1000;
+  V.printCount++;
+  if (V.role === 'traded'){
+    addCandle(V, tms, px);
+    setCell(V, 'px', fmtPx(px));
+  } else {
+    const a = ensureAsset(V, tag || 'spot');
+    if (a.px != null) a.dir = px > a.px ? 1 : px < a.px ? -1 : a.dir;
+    a.px = px;
+    a.flash = nowMs() + 450;
+  }
+}
+
+function onQuote(ev){
+  const {V, tag} = resolve(ev.venue, true);
+  if (!V) return;
+  const bid = +ev.bid, ask = +ev.ask;
+  if (V.role === 'traded'){
+    if (isFinite(bid) && isFinite(ask) && bid > 0 && ask > bid)
+      setCell(V, 'spr', (((ask - bid) / ((ask + bid) / 2)) * 1e4).toFixed(1) + ' bp');
+    return;
+  }
+  const a = ensureAsset(V, tag || 'spot');
+  if (isFinite(bid)) a.bid = bid;
+  if (isFinite(ask)) a.ask = ask;
+}
+
+function onBar(ev){
+  const {V} = resolve(ev.venue, true);
+  if (!V) return;
+  promote(V);
+  V.lastBarAt = Date.now();
+  const tms = ev.ts != null ? +ev.ts : Date.now();
+  if (ev.close != null) addCandle(V, tms, +ev.close);
+  if (ev.target != null && isFinite(+ev.target)){
+    V.target = +ev.target;
+    const sec = Math.floor(tms / 1000);
+    const arr = V.targets;
+    const last = arr[arr.length - 1];
+    if (last && last.time === sec) last.value = V.target;
+    else {
+      arr.push({time:sec, value:V.target});
+      if (arr.length > 3600) arr.splice(0, 600);
+    }
+    if (V.tseries){ try{ V.tseries.update(arr[arr.length - 1]); }catch(_){} }
+  }
+  if (ev.position != null){ V.posLive = +ev.position; refreshPos(V); }
+  if (ev.z != null && isFinite(+ev.z)) setCell(V, 'z', (+ev.z).toFixed(2));
+  if (ev.spread != null && isFinite(+ev.spread)) setCell(V, 'spr', (+ev.spread).toFixed(1) + ' bp');
+  refreshState(V);
+}
+
+function onHistory(ev){
+  const {V} = resolve(ev.venue, true);
+  if (!V) return;
+  promote(V);
+  const sec = Math.floor((+ev.ts || Date.now()) / 1000);
+  const px = +ev.close;
+  if (isFinite(px)){
+    const arr = V.candles;
+    const last = arr[arr.length - 1];
+    if (last && last.time === sec){
+      last.close = px;
+      if (px > last.high) last.high = px;
+      if (px < last.low) last.low = px;
+    } else {
+      arr.push({time:sec, open:px, high:px, low:px, close:px});
+      if (arr.length > 3600) arr.splice(0, 600);
+    }
+  }
+  if (ev.target != null && isFinite(+ev.target)){
+    const arr = V.targets;
+    const last = arr[arr.length - 1];
+    if (last && last.time === sec) last.value = +ev.target;
+    else {
+      arr.push({time:sec, value:+ev.target});
+      if (arr.length > 3600) arr.splice(0, 600);
+    }
+  }
+  V.dirty = true;
+  if (V.els.warm){
+    V.els.warm.textContent = 'historia: ' + V.candles.length + ' velas';
+    clearTimeout(V._warm);
+    V._warm = setTimeout(() => { if (V.els.warm) V.els.warm.textContent = ''; }, 4000);
+  }
+  refreshPos(V); refreshState(V);
+}
+
+function onOrder(ev){
+  const {V} = resolve(ev.venue, true);
+  if (!V) return;
+  promote(V);
+  const px = ev.px != null ? +ev.px : (ev.price != null ? +ev.price : NaN);
+  const qty = +ev.qty;
+  if (V.series && isFinite(px) && px > 0){
+    if (V.entry){ try{ V.series.removePriceLine(V.entry); }catch(_){} V.entry = null; }
+    if (String(ev.side).toLowerCase() === 'buy'){
+      try{
+        V.entry = V.series.createPriceLine({price:px, color:'#7fa6c9', lineWidth:1,
+          lineStyle:2, axisLabelVisible:true, title:'entrada'});
+      }catch(_){}
+    }
+  }
+  liveTrades.unshift({
+    fp:`${ev.venue}|${String(ev.side).toLowerCase()}|${(isFinite(qty) ? qty : 0).toFixed(6)}|` +
+       `${isFinite(px) ? px.toFixed(4) : ''}`,
+    ts:Date.now(), venue:ev.venue, side:ev.side,
+    qty:isFinite(qty) ? qty : null, px:isFinite(px) ? px : null, why:ev.why || '',
+  });
+  if (liveTrades.length > 40) liveTrades.pop();
+  tradesDirty = true;
+  toast(`${ev.venue}: ${ev.side} ${isFinite(qty) ? qty.toFixed(4) : '?'} @ ${isFinite(px) ? fmtPx(px) : '—'}`);
+}
+
+function onMetrics(ev){
+  const {V} = resolve(ev.venue, true);
+  if (!V) return;
+  promote(V);
+  if (ev.pnl != null && isFinite(+ev.pnl)){
+    V.pnl = +ev.pnl;
+    setCell(V, 'pnl', (V.pnl >= 0 ? '+' : '') + V.pnl.toFixed(2));
+    if (V.cells.pnl) V.cells.pnl.parentElement.className = 'm ' + (V.pnl >= 0 ? 'pos' : 'neg');
+  }
+  if (ev.sharpe != null && isFinite(+ev.sharpe)) setCell(V, 'sh', (+ev.sharpe).toFixed(2));
+  if (ev.maxdd != null && isFinite(+ev.maxdd)) setCell(V, 'dd', (+ev.maxdd * 100).toFixed(2) + '%');
+  if (+ev.trips > 0) setCell(V, 'hit', Math.round(100 * ev.wins / ev.trips) + '%');
+  refreshTotal();
+}
+
+function onNotice(ev, kind){
+  if (kind === 'error') errors++;
+  if (kind === 'kill'){
+    const {V} = resolve(ev.venue);
+    if (V){ V.kill = true; refreshState(V); }
+    toast('KILL SWITCH ' + (ev.venue || ''));
+  }
+  addNotice(kind, ev.venue || '', ev.msg || '');
+}
+
+function addNotice(kind, venue, msg){
+  const ul = $('notices');
+  const li = document.createElement('li');
+  li.className = 'n-' + kind;
+  li.innerHTML = `<time>${new Date().toTimeString().slice(0,8)}</time>` +
+                 `<b>${esc(venue)}</b><span>${esc(msg)}</span>`;
+  ul.prepend(li);
+  while (ul.children.length > 10) ul.lastChild.remove();
+}
+
+/* ============ WebSocket con reconexión ============ */
+let ws = null, wsTimer = null, backoff = 1500;
+
+function markConn(txt){
+  const c = $('conn');
+  c.className = '';
+  $('conn-t').textContent = txt;
+}
+
+function scheduleReconnect(){
+  if (wsTimer) return;
+  wsTimer = setTimeout(() => { wsTimer = null; connect(); }, backoff);
+  backoff = Math.min(Math.round(backoff * 1.6), 10000);
+}
+
+function connect(){
+  clearTimeout(wsTimer); wsTimer = null;
+  try{
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/ws');
+  }catch(_){ scheduleReconnect(); return; }
+  ws.onopen = () => {
+    backoff = 1500;
+    const c = $('conn');
+    c.className = 'on';
+    $('conn-t').textContent = 'en vivo';
+  };
+  ws.onclose = () => { markConn('reconectando…'); scheduleReconnect(); };
+  ws.onerror = () => { try{ ws.close(); }catch(_){} };
+  ws.onmessage = onMessage;
+}
+
+function onMessage(e){
+  let ev;
+  try{ ev = JSON.parse(e.data); }catch(_){ return; }
+  if (!ev || typeof ev !== 'object') return;
+  events++;
+  switch (ev.type){
+    case 'print':   onPrint(ev);   break;
+    case 'quote':   onQuote(ev);   break;
+    case 'bar':     onBar(ev);     break;
+    case 'history': onHistory(ev); break;
+    case 'order':   onOrder(ev);   break;
+    case 'metrics': onMetrics(ev); break;
+    case 'notice':  onNotice(ev, 'notice'); break;
+    case 'error':   onNotice(ev, 'error');  break;
+    case 'kill':    onNotice(ev, 'kill');   break;
+  }
+}
+
+/* ============ sondeos REST ============ */
+async function pollVenues(){
+  try{
+    const r = await fetch('/api/venues', {cache:'no-store'});
+    const vs = await r.json();
+    if (Array.isArray(vs)) for (const v of vs) register(v);
+  }catch(_){}
+}
+
+function setPill(name, val){
+  const el = $('pill-' + name);
+  if (!el) return;
+  const v = +val;
+  const label = name === 'feed' ? 'feed' : name === 'bar' ? 'velas' : 'cerebro';
+  const cls = !isFinite(v) ? '' : v >= 300 ? 'bad' : v >= 60 ? 'warn' : 'ok';
+  el.textContent = label + ' ' + (isFinite(v) ? Math.round(v) + 's' : '—');
+  el.className = 'pill' + (cls ? ' ' + cls : '');
+}
+
+async function pollHealth(){
+  try{
+    const h = await (await fetch('/api/health', {cache:'no-store'})).json();
+    setPill('feed', h.feed_hb_s);
+    setPill('bar', h.last_bar_s);
+    setPill('brain', h.brain_age_s);
+  }catch(_){}
+}
+
+async function pollBookkeeping(){
+  await Promise.all([...venues.keys()].map(async id => {
+    const V = venues.get(id);
+    try{
+      const r = await (await fetch('/api/open-orders/' + encodeURIComponent(id),
+                        {cache:'no-store'})).json();
+      V._orders = Array.isArray(r) ? r : null;
+      if (V._orders && V._orders.length && V.role === 'data') promote(V);
+    }catch(_){}
+    try{
+      const r = await (await fetch('/api/trades/' + encodeURIComponent(id),
+                        {cache:'no-store'})).json();
+      V._trades = Array.isArray(r) ? r : null;
+    }catch(_){}
+  }));
+  renderOrders();
+  renderTrades();
+}
+
+function renderOrders(){
+  let html = '';
+  for (const V of venues.values()){
+    for (const r of (V._orders || [])){
+      const side = String(r.side || '').toLowerCase();
+      const px = r.px != null && isFinite(+r.px) ? fmtPx(+r.px) : '';
+      html += `<tr><td class="cv">${esc(V.id)}</td>` +
+              `<td>${esc(r.symbol || r.instrument || '—')}</td>` +
+              `<td class="${side === 'buy' ? 'buy' : side === 'sell' ? 'sell' : ''}">${esc(r.side || '—')}</td>` +
+              `<td>${esc(r.qty != null ? fmtQ(r.qty) : '—')}</td><td>${px}</td></tr>`;
+    }
+  }
+  $('oo').innerHTML = html || '<tr><td colspan="5" class="empty">sin órdenes abiertas</td></tr>';
+}
+
+function renderTrades(){
+  const liveByFp = new Map();
+  for (const t of liveTrades) liveByFp.set(t.fp, t.ts);
+  const rows = [];
+  for (const t of liveTrades) rows.push(t);
+  for (const V of venues.values()){
+    for (const r of (V._trades || []).slice(0, 15)){
+      const qty = +r.qty, px = r.px != null ? +r.px : null;
+      const fp = `${V.id}|${String(r.side || '').toLowerCase()}|` +
+                 `${(isFinite(qty) ? qty : 0).toFixed(6)}|${px != null ? px.toFixed(4) : ''}`;
+      const lt = liveByFp.get(fp);
+      if (lt && Math.abs((+r.ts || 0) - lt) < 20000) continue; // ya llegó por WS
+      rows.push({ts:+r.ts, venue:V.id, side:r.side, qty, px, why:r.why || ''});
+    }
+  }
+  rows.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  const html = rows.slice(0, 40).map(r => {
+    const side = String(r.side || '').toLowerCase();
+    const t = isFinite(r.ts) && r.ts > 0 ? new Date(r.ts).toTimeString().slice(0, 8) : '—';
+    return `<tr><td>${t}</td><td class="cv">${esc(r.venue)}</td>` +
+           `<td class="${side === 'buy' ? 'buy' : side === 'sell' ? 'sell' : ''}">${esc(r.side || '—')}</td>` +
+           `<td>${r.qty != null ? fmtQ(r.qty) : '—'}</td>` +
+           `<td>${r.px != null ? fmtPx(r.px) : '—'}</td>` +
+           `<td class="why" title="${esc(r.why)}">${esc(r.why || '')}</td></tr>`;
+  }).join('');
+  $('th').innerHTML = html || '<tr><td colspan="6" class="empty">sin trades aún</td></tr>';
+}
+
+/* ============ bucle único de repintado (rAF) ============ */
+function paint(){
+  const t = nowMs();
+  for (const V of venues.values()){
+    if (V.dirty){
+      if (V.series) V.series.setData(V.candles);
+      if (V.tseries) V.tseries.setData(V.targets);
       V.dirty = false;
     }
-    if (V.metaDirty && V.cells) {
-      const m = V.candles_data[V.candles_data.length-1];
-      if (V.cells.px) V.cells.px.textContent = m ? m.close.toFixed(2) : '—';
-      V.metaDirty = false;
+    if (V.role !== 'data') continue;
+    if (t - V.rateAt >= 1000){
+      V.rate = V.printCount; V.printCount = 0; V.rateAt = t;
+      if (V.els.rate && V._rateTxt !== V.rate){ V._rateTxt = V.rate; V.els.rate.textContent = V.rate + ' p/s'; }
+    }
+    for (const a of V.assets.values()){
+      if (!a.row) continue;
+      const cl = t < a.flash ? (a.dir >= 0 ? 'f-up' : 'f-dn') : '';
+      if (a.lastCl !== cl){ a.lastCl = cl; a.row.root.className = 'drow' + (cl ? ' ' + cl : ''); }
+      const p = a.px != null ? fmtPx(a.px) : '—';
+      if (a.lastP !== p){ a.lastP = p; a.row.px.textContent = p; }
+      const s = (a.bid != null && a.ask != null && a.bid > 0 && a.ask > a.bid)
+        ? (((a.ask - a.bid) / ((a.ask + a.bid) / 2)) * 1e4).toFixed(1) + ' bp' : '—';
+      if (a.lastS !== s){ a.lastS = s; a.row.spr.textContent = s; }
     }
   }
-  $('f-ev').textContent = events; $('f-err').textContent = errors;
+  const cnt = events + ' ev · ' + errors + ' err';
+  const cEl = $('counters');
+  if (cEl._t !== cnt){ cEl._t = cnt; cEl.textContent = cnt; }
+  if (tradesDirty && t - lastTradeRender > 400){
+    tradesDirty = false; lastTradeRender = t; renderTrades();
+  }
   requestAnimationFrame(paint);
 }
-requestAnimationFrame(paint);
 
-let lastBar = {}; // venue -> {time, bar}
-function applyBar(ev) {
-  const V = VENUES[ev.venue]; if (!V) return;
-  const t = Math.floor(ev.ts/1000);
-  const bar = {time:t, open:ev.close, high:ev.close, low:ev.close, close:ev.close};
-  const arr = V.candles_data, last = arr[arr.length-1];
-  if (last && last.time === t) arr[arr.length-1] = bar; else arr.push(bar);
-  if (V.candles_data.length > 3600) V.candles_data.splice(0, 600);
-  if (V.cells.pos && ev.position !== undefined) {
-    V.cells.pos.textContent = (+ev.position).toFixed(4);
-    V.cells.pos.parentElement.className = 'm ' +
-      (ev.position > 0 ? 'pos' : ev.position < 0 ? 'neg' : '');
-  }
-  if (ev.target !== undefined) {
-    if (V.cells.tg) V.cells.tg.textContent = (+ev.target).toFixed(4);
-    V.eq_data.push({time:t, value:ev.target});
-    if (V.eq_data.length > 3600) V.eq_data.splice(0, 600);
-    V.eq.update({time:t, value:ev.target});
-  }
-  if (ev.z !== undefined && V.cells.z) V.cells.z.textContent = ev.z.toFixed(2);
-  if (ev.state !== undefined) {
-    V.els.state.textContent = ev.state > 0 ? 'LONG' : ev.state < 0 ? 'SHORT' : 'flat';
-    V.els.state.classList.toggle('long', ev.state > 0);
-    V.els.state.classList.toggle('short', ev.state < 0);
-  }
-  // live update (setData only on connect/history)
-  V.candles.update(bar);
-  V.metaDirty = true;
+/* ============ toast + reloj ============ */
+let toastH = null;
+function toast(m){
+  const t = $('toast');
+  t.textContent = m;
+  t.classList.add('show');
+  clearTimeout(toastH);
+  toastH = setTimeout(() => t.classList.remove('show'), 2600);
 }
 
-function connect() {
-  async function pollBookkeeping() {
-  try {
-    const vs = await (await fetch('/api/venues')).json();
-    let oo = '';
-    for (const v of vs) {
-      const rows = await (await fetch('/api/open-orders/' + v.id)).json();
-      for (const r of (Array.isArray(rows) ? rows : []))
-        oo += `<tr><td class="v">${v.id}</td><td>${r.symbol || r.instrument || '—'}</td>` +
-              `<td class="${String(r.side||'').toLowerCase()}">${r.side || '—'}</td><td>${r.qty}</td></tr>`;
-    }
-    document.querySelector('#oo').innerHTML = oo || '<tr><td colspan="4" style="color:var(--mut2)">sin órdenes abiertas</td></tr>';
-    let th = '';
-    for (const v of vs) {
-      const rows = await (await fetch('/api/trades/' + v.id)).json();
-      for (const r of rows.slice(0, 12))
-        th += `<tr><td>${new Date(r.ts).toTimeString().slice(0,8)}</td><td class="v">${v.id}</td>` +
-              `<td class="${r.side}">${r.side}</td><td>${(+r.qty).toFixed(4)}</td></tr>`;
-    }
-    document.querySelector('#th').innerHTML = th || '<tr><td colspan="4" style="color:var(--mut2)">sin trades aún</td></tr>';
-  } catch {}
-}
-setInterval(pollBookkeeping, 5000);
+function tickClock(){ $('clock').textContent = new Date().toISOString().slice(11, 19) + ' UTC'; }
+
+/* ============ arranque ============ */
+tickClock();
+setInterval(tickClock, 1000);
+pollVenues();
+connect();
+pollHealth();
 pollBookkeeping();
-const ws = new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws`);
-  ws.onopen = () => { $('conn').className='on'; $('conn').innerHTML='<span class="dot"></span>en vivo'; };
-  ws.onclose = () => { $('conn').className=''; $('conn').innerHTML='<span class="dot"></span>reconectando…';
-                       setTimeout(connect,1500); };
-  ws.onmessage = e => {
-    let ev; try { ev = JSON.parse(e.data); } catch { return; }
-    events++;
-    if (ev.type === 'error') errors++;
-    // los prints de venues de datos llegan con tag "okx:btc-usdt-swap":
-    // caen en el panel de la venue base
-    const base = (ev.venue || '').split(':')[0];
-    const V = VENUES[ev.venue] || VENUES[base]; if (!V) return;
-    if (ev.type === 'print') { applyBar({venue: base, ts: ev.sec * 1000,
-      close: ev.px, position: V.position || 0}); return; }
-    if (ev.type === 'history') {
-      const t = Math.floor(ev.ts/1000);
-      V.candles_data.push({time:t, open:ev.close, high:ev.close, low:ev.close, close:ev.close});
-      V.eq_data.push({time:t, value:ev.target});
-      V.els.warm.textContent = 'historia precargada: ' + V.candles_data.length + ' velas';
-      V.dirty = true; V.metaDirty = true;
-      clearTimeout(V._h); V._h = setTimeout(() => V.els.warm.textContent = '', 4000);
-    }
-    else if (ev.type === 'bar') applyBar(ev);
-    else if (ev.type === 'order') {
-      toast(`${ev.venue}: ${ev.side} ${(+ev.qty).toFixed(4)} @ ${(ev.price||0).toFixed(2)}`);
-      if (ev.side === 'buy') {
-        if (V.setPos.line) V.candles.removePriceLine(V.setPos.line);
-        V.setPos.line = V.candles.createPriceLine({price:ev.price,color:'#7fa6c9',
-          lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'entrada'});
-      } else if (V.setPos.line) { V.candles.removePriceLine(V.setPos.line); V.setPos.line = null; }
-    }
-    else if (ev.type === 'notice') { toast(`${ev.venue}: ${ev.msg}`); V.els.warm.textContent = ev.msg; }
-    else if (ev.type === 'kill') { toast(`KILL SWITCH ${ev.venue}`); V.els.state.textContent = 'kill'; }
-    else if (ev.type === 'metrics') {
-      const c = V.cells; if (!c.pnl) return;
-      c.pnl.textContent = (ev.pnl >= 0 ? '+' : '') + ev.pnl.toFixed(2);
-      c.pnl.parentElement.className = 'm ' + (ev.pnl >= 0 ? 'pos' : 'neg');
-      c.sh.textContent = ev.sharpe.toFixed(2);
-      c.hit.textContent = ev.trips ? Math.round(100 * ev.wins / ev.trips) + '%' : '—';
-      c.dd.textContent = (ev.maxdd * 100).toFixed(2) + '%';
-    }
-  };
-}
+setInterval(pollVenues, 5000);
+setInterval(pollHealth, 5000);
+setInterval(pollBookkeeping, 5000);
+requestAnimationFrame(paint);
 </script>
 </body>
 </html>

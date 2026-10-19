@@ -64,13 +64,16 @@ async def flatten(request):
     venue = request.match_info["venue"]
     v = next((v for v in VENUES if v["id"] == venue), None)
     if not v: return web.json_response({"ok": False, "msg": "venue desconocido"})
-    # venues virtuales: flatten long o short vía el ejecutor
+    # venues virtuales: flatten long Y short vía el ejecutor
     if v.get("executor"):
         st = v["state"]; pos = st["pos"]
         if abs(pos) > 1e-9:
             r = executors.execute(st, "sell" if pos > 0 else "buy",
                                   abs(pos), why="flatten")
-            ok, msg = r.get("ok", False), f"flatten {pos} enviado"
+            if r.get("ok"):
+                ok, msg = True, f"flatten {pos} @ {r['avg_px']:.2f}"
+            else:
+                ok, msg = False, f"flatten falló: {r.get('msg')}"
         else:
             ok, msg = True, "posición ya plana"
         broadcast({"type": "notice", "venue": venue, "msg": msg})
@@ -79,21 +82,24 @@ async def flatten(request):
     inst = (v.get("state") or {}).get("instrument")
     pos = (v.get("state") or {}).get("pos", 0.0)
     ok, msg = False, "engine no disponible"
-    if api is not None and pos and pos > 0:
+    # corto o largo: el flatten invierte el signo con orden de mercado
+    if api is not None and abs(pos) > 1e-9:
         try:
             if venue == "grvt":
-                api.create_order(inst, "market", "sell", pos)
+                api.create_order(inst, "market",
+                                 "sell" if pos > 0 else "buy", abs(pos))
             else:
                 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
                 from alpaca.trading.enums import OrderSide, TimeInForce
                 api.submit_order(MarketOrderRequest(
-                    symbol=inst.replace("/", ""), qty=pos, side=OrderSide.SELL,
+                    symbol=inst.replace("/", ""), qty=abs(pos),
+                    side=OrderSide.SELL if pos > 0 else OrderSide.BUY,
                     time_in_force=TimeInForce.GTC))
             ok, msg = True, f"flatten {pos} {inst} enviado"
             v["state"]["pos"] = 0.0
         except Exception as e:
             msg = f"flatten falló: {e}"
-    elif pos == 0:
+    elif abs(pos) <= 1e-9:
         ok, msg = True, "posición ya plana"
     broadcast({"type": "notice", "venue": venue, "msg": msg})
     return web.json_response({"ok": ok, "msg": msg})
@@ -171,10 +177,16 @@ async def trade_history(request):
                               for t, s, q, p, r in rows])
 
 async def venue_position(request):
-    """THE truth: the venue's own position, via the SDK."""
+    """THE truth: the venue's own position, via the SDK. Para venues
+    virtuales, el estado del ejecutor — devolver null haría que el
+    cerebro 'reconciliara' hacia cero venues vivos."""
     venue = request.match_info["venue"]
     v = next((v for v in VENUES if v["id"] == venue), None)
-    if not v or (v.get("state") or {}).get("api") is None:
+    if not v:
+        return web.json_response({"position": None})
+    if v.get("executor"):
+        return web.json_response({"position": v["state"]["pos"]})
+    if (v.get("state") or {}).get("api") is None:
         return web.json_response({"position": None})
     try:
         if venue == "grvt":
@@ -325,9 +337,15 @@ async def health(request):
         row = c.execute("SELECT MAX(ts) FROM bars").fetchone()[0]
         last_bar = (_t.time() - row / 1000) if row else None
     except Exception: pass
+    # edad del cerebro: si no emite nada en mucho tiempo, está podrido
+    brain = None
+    try:
+        brain = _t.time() - os.path.getmtime("clj_events.jsonl")
+    except Exception: pass
     return web.json_response({
         "feed_hb_s": hb,
         "last_bar_s": last_bar,
+        "brain_age_s": brain,
         "learner_log": os.path.exists("/tmp/learning_log.jsonl"),
         "clients_ws": len(clients)})
 

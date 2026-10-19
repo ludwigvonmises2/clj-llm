@@ -49,27 +49,33 @@ def execute(state, side, qty, why="signal"):
         cost += take * fill_px
         remaining -= take
     avg_px = cost / filled if filled else last
-    fee = avg_px * qty * FEE
-    # contabilidad long/short simétrica (cerrar corto con compra realiza
-    # entry - avg_px; cerrar largo con venta, avg_px - entry)
-    pos, entry, realized = state["pos"], state["entry"], state["realized"]
-    if side == "buy":
-        if pos < 0:
-            realized += (entry - avg_px) * min(qty, -pos)
-        new_pos = pos + qty
-        new_entry = ((entry * abs(pos)) + avg_px * qty) / (abs(pos) + qty) \
-            if (pos + qty) != 0 else avg_px
-        state["pos"], state["entry"] = new_pos, new_entry
-        if new_pos <= 0:
-            state["entry"] = 0.0
+    qty_eff = filled                      # jamás mover posición sin fill
+    fee = avg_px * qty_eff * FEE
+    # CONTABILIDAD long/short (regla única, simétrica):
+    #   mismo sentido y crece  -> entry ponderado, sin realized
+    #   mismo sentido y reduce -> realized (avg_px - entry) * cerrado * signo
+    #   cierre total / flip    -> realized de la pierna vieja; entry fresco
+    old_pos = state["pos"]
+    entry = state["entry"]
+    signed_delta = qty_eff if side == "buy" else -qty_eff
+    new_pos = old_pos + signed_delta
+    realized_delta = 0.0
+    if old_pos != 0 and (new_pos == 0 or ((old_pos > 0) != (new_pos > 0))):
+        closed = abs(old_pos)
+        realized_delta = (avg_px - entry) * closed * (1 if old_pos > 0 else -1)
+        new_entry = avg_px if new_pos != 0 else 0.0
+    elif old_pos == 0:
+        new_entry = avg_px
+    elif abs(new_pos) < abs(old_pos):
+        realized_delta = (avg_px - entry) * abs(signed_delta) \
+            * (1 if old_pos > 0 else -1)
+        new_entry = entry
     else:
-        if pos > 0:
-            realized += (avg_px - entry) * min(qty, pos)
-        state["pos"] = pos - qty
-        state["realized"] = realized
-        if state["pos"] <= 0:
-            state["entry"] = 0.0
-    state["realized"] = realized
+        new_entry = ((entry * abs(old_pos)) + avg_px * abs(signed_delta)) \
+            / abs(new_pos)
+    state["pos"] = new_pos
+    state["entry"] = new_entry
+    state["realized"] = state["realized"] + realized_delta - fee
     return {"ok": True, "avg_px": avg_px, "fee": fee,
             "tranches": len(tranches),
             "slippage_bps": abs(avg_px / last - 1) * 10000,

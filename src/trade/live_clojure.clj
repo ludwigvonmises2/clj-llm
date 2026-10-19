@@ -73,18 +73,29 @@
         resp (.send client req (HttpResponse$BodyHandlers/ofString))]
     (.body resp)))
 
+(def champion-cache (atom {:at 0 :params {}}))
+
 (defn champion-params
   "Sección :scalp o :swing del campeón; :side solo cuando el learner lo
-  haya validado N/N (hoy :long-dip, validado en 1m)."
+  haya validado N/N (hoy :long-dip, validado en 1m). CACHEADO: el
+  camino de decisión jamás toca el disco (recarga cada 30 s; el
+  aprendizaje en caliente escribe, el cerebro lo adopta solo)."
   [mode]
-  (try
-    (let [ch (edn/read-string (slurp "live/champion.edn"))
-          sec (get ch mode)]
-      (select-keys sec [:k :w :threshold :side]))
-    (catch Exception _
-      (if (= :scalp mode)
-        {:k 20 :w 120 :threshold 1.5 :side :long-dip}
-        {:k 60 :w 360 :threshold 3.0 :side :long-dip}))))
+  (let [now (now-ms)
+        {:keys [at params]} @champion-cache
+        fresh (if (> (- now at) 30000)
+                (let [p (try
+                          (edn/read-string (slurp "live/champion.edn"))
+                          (catch Exception _ {}))]
+                  (reset! champion-cache {:at now :params p})
+                  p)
+                params)]
+    (let [sec (get fresh mode)]
+      (if (and (:k sec) (:w sec) (:threshold sec))
+        (select-keys sec [:k :w :threshold :side])
+        (if (= :scalp mode)
+          {:k 20 :w 120 :threshold 1.5 :side :long-dip}
+          {:k 60 :w 360 :threshold 3.0 :side :long-dip})))))
 
 (defn venue-order! [id qty ctx]
   (let [now (now-ms)]
@@ -100,12 +111,16 @@
       (catch Exception e
         {:ok false :msg (.getMessage e)}))))
 
-(defn venue-position! [id]
+(defn venue-position!
+  "Posición según el VENUE, o nil si no está disponible — jamás 0.0:
+  confundir venue-caído con posición-plana resets a cero y dispara
+  sobre-órdenes (fallo C4 del review)."
+  [id]
   (try
     (let [b (json/parse-string
              (post! (str gateway-url "/api/position/" id) "{}") true)]
-      (or (:position b) 0.0))
-    (catch Exception _ 0.0)))
+      (:position b))
+    (catch Exception _ nil)))
 
 (defn mtm-init [] {:prev nil :entry 0.0 :realized 0.0 :wins 0 :trips 0
                    :peak 1.0 :eq 1.0 :rets [] :tick 0})
@@ -176,7 +191,8 @@
                         ;; mark-to-market de la sesión
                         (let [mtm (:mtm st)
                               {:keys [prev entry peak eq rets tick]} @mtm
-                              ret (if (and prev (pos? prev) (pos? pos))
+                              ret (if (and prev (not (zero? prev))
+                                           (not (zero? pos)))
                                     (* pos (/ (- px prev) prev)) 0.0)
                               eq2 (* eq (+ 1.0 ret))
                               new-peak (max peak eq2)
@@ -287,61 +303,105 @@
                                       :px (double (:close m)) :pos @(:pos st)
                                       :bid @(:bid st) :ask @(:ask st)}))))))
         listener (reify WebSocket$Listener
-                   (onOpen [this ws] (.request ws 1))
+                   ;; CONTRATO java: cada método devuelve CompletionStage
+                   ;; o null. Devolver lo último evaluado (p.ej. la
+                   ;; posición Double de decide!) mata el socket con
+                   ;; ClassCastException en la PRIMERA decisión — fallo
+                   ;; medido; todo método termina en nil explícito.
+                   ;; FLOW CONTROL: demanda alta y re-arme por lotes —
+                   ;; pedir 1 a 1 ahoga al cliente con el burst history.
+                   (onOpen [this ws]
+                     (.request ws 4096) nil)
                    (onText [this ws data last]
-                     (.request ws 1)
-                     (reset! last-msg-ms (now-ms))
-                     (doto ^StringBuilder @pending (.append ^CharSequence data))
-                     (when last
-                       (let [s (str (doto ^StringBuilder @pending (.setLength 0)))]
-                         (try
-                           (let [m (json/parse-string s true)
-                                 t (:type m)]
-                             (cond
-                               (= t "print") (on-print m)
-                               (= t "bar") (on-bar-1m m)
-                               (= t "quote")
-                               (let [[_ st] (first (filter
-                                                    (fn [[_ s]]
-                                                      (= (:tag (:spec s)) (:venue m)))
-                                                    @rt))]
-                                 (when (and st (:bid m) (:ask m)
-                                            (pos? (double (:bid m))))
-                                   (reset! (:bid st) (double (:bid m)))
-                                   (reset! (:ask st) (double (:ask m)))))))
-                           (catch Exception e
-                             (println "EXC parse:" (.getMessage e)))))))
+                     (try
+                       (.request ws 4096)
+                       (reset! last-msg-ms (now-ms))
+                       (doto ^StringBuilder @pending (.append ^CharSequence data))
+                       (when last
+                         ;; LEER primero, limpiar después: vaciar antes de
+                         ;; convertir dejaba s="" SIEMPRE — cerebro sordo
+                         ;; con el watchdog engañado (fallo C3, medido)
+                         (let [s (str @pending)]
+                           (.setLength ^StringBuilder @pending 0)
+                           (try
+                             (let [m (json/parse-string s true)
+                                   t (:type m)]
+                               (cond
+                                 (= t "print") (on-print m)
+                                 (= t "bar") (on-bar-1m m)
+                                 (= t "quote")
+                                 (let [[_ st] (first (filter
+                                                      (fn [[_ s]]
+                                                        (= (:tag (:spec s)) (:venue m)))
+                                                      @rt))]
+                                   (when (and st (:bid m) (:ask m)
+                                              (pos? (double (:bid m))))
+                                     (reset! (:bid st) (double (:bid m)))
+                                     (reset! (:ask st) (double (:ask m)))))))
+                             (catch Exception e
+                               (println "EXC dispatch:" (.getMessage e)
+                                        (first (.getStackTrace e)))))))
+                       nil
+                       (catch Exception e
+                         (println "EXC listener:" (.getMessage e))
+                         nil)))
                    (onError [this ws err]
-                     (emit {:type "error" :venue "brain" :msg (str err)}))
+                     (emit {:type "error" :venue "brain" :msg (str err)})
+                     nil)
                    (onClose [this ws code reason]
                      (emit {:type "error" :venue "brain"
-                            :msg (str "ws closed " code)})))]
+                            :msg (str "ws closed " code)})
+                     nil))]
     (emit {:type "start" :venue "brain" :dry dry :git (git-sha)
            :venues (mapv :id venue-specs)
            :data "relé del desk; el venue es la fuente de verdad"})
-    ;; seed de posiciones: el venue manda
+    ;; seed de posiciones: el venue manda (nil = no disponible: no tocar)
     (doseq [{:keys [id]} venue-specs]
-      (let [p (venue-position! id)
-            st (get @rt id)]
-        (reset! (:pos st) p)
-        (emit {:type "reconcile" :venue id :interno 0.0 :venue-pos p})))
-    @(.buildAsync ^WebSocket$Builder
-      (.newWebSocketBuilder (HttpClient/newHttpClient))
-                  ^URI (URI/create ws-url)
-                  ^WebSocket$Listener listener)
+      (when-let [p (venue-position! id)]
+        (let [st (get @rt id)]
+          (reset! (:pos st) p)
+          (emit {:type "reconcile" :venue id :interno 0.0 :venue-pos p}))))
+    ;; handshake con límite duro: un deref bloqueante sin timeout se
+    ;; cuelga en silencio (fallo medido hoy) — si falla, lo grita y el
+    ;; watchdog del loop fuerza el reinicio limpio
+    (let [fut (.buildAsync ^WebSocket$Builder
+               (.newWebSocketBuilder (HttpClient/newHttpClient))
+                           ^URI (URI/create ws-url)
+                           ^WebSocket$Listener listener)]
+      (try
+        @(.orTimeout fut 15 java.util.concurrent.TimeUnit/SECONDS)
+        (catch Exception e
+          (emit {:type "error" :venue "brain"
+                 :msg (str "ws handshake falló: " (.getMessage e))}))))
     ;; reconciliación cada 10 s, presupuesto de errores: el venue gana
+    ;; watchdog + reconciliación: sin mensajes del relé en 90 s el
+    ;; cerebro está sordo — se suicida y el supervisor lo levanta
+    ;; (lo que no se puede podrir en silencio, se reinicia)
     (loop [errs (long 0)]
       (Thread/sleep ^long reconcile-ms)
+      (when (> (- (now-ms) @last-msg-ms) 90000)
+        (emit {:type "error" :venue "brain"
+               :msg "watchdog: relé mudo >90s, reinicio"})
+        (System/exit 1))
       (let [err2
             (reduce (fn [acc {:keys [id]}]
                       (let [vp (venue-position! id)
-                            st (get @rt id)
-                            diff (- vp @(:pos st))]
-                        (if (> (Math/abs ^double diff) 1e-6)
-                          (do (emit {:type "reconcile" :venue id
-                                     :interno @(:pos st) :venue-pos vp})
-                              (reset! (:pos st) vp)
-                              acc)
-                          acc)))
+                            st (get @rt id)]
+                        (cond
+                          ;; venue inalcanzable: CONSERVAR la posición
+                          ;; interna, contar el error, no inventar plano
+                          (nil? vp)
+                          (do (when (zero? (mod (inc acc) 6))
+                                (emit {:type "error" :venue id
+                                       :msg "posición del venue no disponible"}))
+                              (inc acc))
+                          :else
+                          (let [diff (- vp @(:pos st))]
+                            (if (> (Math/abs ^double diff) 1e-6)
+                              (do (emit {:type "reconcile" :venue id
+                                         :interno @(:pos st) :venue-pos vp})
+                                  (reset! (:pos st) vp)
+                                  acc)
+                              acc)))))
                     errs venue-specs)]
         (recur (long err2))))))
