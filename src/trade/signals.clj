@@ -90,11 +90,11 @@
                    (/ (- (nth prefix (inc i)) (nth prefix (inc (- i k))))
                       (* rv sk))
                    0.0)
-              state (cond (= 0.0 state)
+              state (double (cond (== 0.0 state)
                           (cond (< z (- (double threshold))) 1.0
                                 (and (= side :both) (> z (double threshold))) -1.0
                                 :else 0.0)
                           (pos? state) (if (>= z 0.0) 0.0 1.0)
-                          :else        (if (<= z 0.0) 0.0 -1.0))
+                          :else        (if (<= z 0.0) 0.0 -1.0)))
               scale (if (and rv (pos? rv)) (min (/ tdv rv) (double max-lev)) 0.0)]
           (recur (inc i) state (conj! acc (* state scale))))))))
