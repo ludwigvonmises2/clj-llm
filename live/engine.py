@@ -7,19 +7,21 @@ import math, os
 class DipEngine:
     """z = k-bar cumulative log return over realized vol; long on
     z < -thr, exit on z >= 0; target-vol scaled, capped."""
-    def __init__(self, k=None, w=None, thr=None, ppy=525600,
+    def __init__(self, mode="scalp", k=None, w=None, thr=None, ppy=525600,
                  target_vol=0.30, max_lev=2.0):
-        # FUENTE ÚNICA de parámetros: live/champion.edn (validado por
-        # fold-verify). Los defaults solo aplican si no existe.
+        # FUENTE ÚNICA de parámetros: live/champion.edn, sección del
+        # modo de este venue (scalp 1s / swing 1m). Defaults si falta.
         champ = {}
         try:
-            import re
             txt = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "champion.edn")).read()
-            for key in ("k", "w", "threshold"):
-                m = re.search(rf":{key}\s+([0-9.]+)", txt)
-                if m:
-                    champ[key] = float(m.group(1))
+            sec = "scalp" if mode == "scalp" else "swing"
+            block = re.search(rf":{sec}\s+\{{([^}}]*)\}}", txt)
+            if block:
+                for key in ("k", "w", "threshold"):
+                    m = re.search(rf":{key}\s+([0-9.]+)", block.group(1))
+                    if m:
+                        champ[key] = float(m.group(1))
         except Exception:
             pass
         k = champ.get("k", k if k else 20)

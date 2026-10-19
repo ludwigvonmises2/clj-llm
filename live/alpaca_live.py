@@ -84,7 +84,7 @@ async def run_async(on_event, dry):
     STATE["instrument"] = asset
     STATE["api"] = api
     STATE["pos"] = venue_position(ap_symbol)
-    eng = DipEngine(k=20, w=120, thr=1.5, ppy=525600)  # scalp 1m propio del venue
+    eng = DipEngine(mode="swing", ppy=525600)  # swing 1m, params del campeón
     on_event({"type": "start", "venue": "alpaca", "instrument": asset,
               "dry": dry, "position": STATE["pos"]})
     closer = BarCloser()

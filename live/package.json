@@ -1,6 +1,0 @@
-{
-  "name": "mr-dip-live",
-  "private": true,
-  "description": "Desk de live trading — dependencias Node eliminadas: el servidor es Python (server.py) y la UI no usa librerías externas",
-  "dependencies": {}
-}

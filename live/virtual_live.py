@@ -83,7 +83,7 @@ def virtual_execute(side, qty, decision_px, rv, last):
             "slippage_bps": abs(avg_px / decision_px - 1) * 10000}
 
 async def main_loop(on_event, dry):
-    eng = DipEngine(k=20, w=120, thr=1.5, ppy=31536000)  # scalp 1s
+    eng = DipEngine(mode="scalp", ppy=31536000)  # scalp 1s, params del campeón
     on_event({"type": "start", "venue": "binance-v", "instrument": "BTCUSDT",
               "dry": dry, "position": STATE["pos"],
               "data": "Binance producción + ejecución virtual ultrarrealista"})

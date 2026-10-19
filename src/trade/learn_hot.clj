@@ -164,15 +164,48 @@
                      (:k campeon) (:w campeon) (:threshold campeon)
                      (:score campeon) (:vecinos campeon)))
     (spit "live/champion.edn"
-          (str "{:k " (:k campeon) " :w " (:w campeon)
+          (str "{:scalp {:k " (:k campeon) " :w " (:w campeon)
                " :threshold " (:threshold campeon)
-               " :name \"scalping-grid\""
-               " :score " (:score campeon)
-               " :vecinos " (:vecinos campeon) "}\n"))
+               " :name \"scalping-grid\" :score " (:score campeon)
+               " :vecinos " (:vecinos campeon) "}\n"
+               ;; swing 1m: se rellena con la pasada --1m
+               " :swing {:k 60 :w 360 :threshold 3.0 :name \"default\"}}\n"))
+    campeon))
+
+(defn ^:private grid-1m
+  "Entrenamiento SWING: familia sobre velas 1m reales (corpus histórico
+  de 1 año). Escribe la sección :swing del champion."
+  []
+  (let [bars (json/parse-string (slurp "data/market/BTCUSDT_1m.json") true)
+        closes (mapv #(Double/parseDouble (str (:c %)))
+                     (take-last 50000 bars))
+        configs (for [k [40 60 100] w [120 240 480] thr [2.2 3.0]]
+                  {:k k :w w :threshold thr :ppy 525600 :tv 0.30})
+        scored (doall
+                (for [cfg configs]
+                  (let [sigfn (sigfn-for (assoc cfg :ppy 525600 :tv 0.30))
+                        [w n] (portfolio/fold-verify closes sigfn 525600
+                                                     cost 6 15000 false)]
+                    (println (format "  swing k=%d w=%d z=%.1f -> %d/%d"
+                                     (:k cfg) (:w cfg) (:threshold cfg) w n))
+                    (assoc cfg :wins w :folds n))))
+        campeon (first (sort-by :wins > scored))]
+    (println (format "CAMPEÓN SWING: k=%d w=%d z=%.1f | %d/%d pliegues"
+                     (:k campeon) (:w campeon) (:threshold campeon)
+                     (:wins campeon) (:folds campeon)))
+    (let [prev (try (edn/read-string (slurp "live/champion.edn"))
+                    (catch Exception _ {}))]
+      (spit "live/champion.edn"
+            (str (assoc-in (or prev {}) :swing
+                           {:k (:k campeon) :w (:w campeon)
+                            :threshold (:threshold campeon)
+                            :name "swing-grid" :wins (:wins campeon)
+                            :folds (:folds campeon)}) "\n")))
     campeon))
 
 (defn -main [& args]
   (cond
+    (= "--1m" (first args)) (grid-1m)
     (= "--1s" (first args))
     (let [path (or (second args) "data/market/BTCUSDT_1s.json")
           bars (json/parse-string (slurp path) true)
