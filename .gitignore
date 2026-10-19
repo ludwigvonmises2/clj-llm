@@ -1,6 +1,9 @@
-data/
-.cpcache/
-.lsp/
-.clj-kondo/
-target/
+live/.venv-grvt/
+live/node_modules/
+live/desk.db*
+live/clj_state.json
+live/grvt_state.json
+live/clj_events.jsonl
+live/clj_orders.jsonl
+__pycache__/
 *.log
