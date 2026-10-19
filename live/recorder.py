@@ -16,6 +16,10 @@ TAPE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tape")
 FEEDS = [
     ("grvt", "BTC_USDT_Perp"),
     ("binance-all", "BTCUSDT"),
+    ("okx", "BTC-USDT-SWAP"),
+    ("bybit", "BTCUSDT"),
+    ("coinbase", "BTC-USD"),
+    ("kraken", "BTC/USD"),
 ]
 
 def tape_write(venue, ev):

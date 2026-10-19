@@ -11,7 +11,7 @@ Each adapter implements the same contract:
         {"type": "print", "venue": ..., "sec": int, "px": float}
         {"type": "quote", "venue": ..., "bid": float, "ask": float}
 """
-import asyncio, json, time
+import asyncio, datetime, json, time
 
 import aiohttp
 
@@ -103,6 +103,163 @@ async def binance_feed(_, on_event, stop):
                     pass
 
 FEEDS = {"grvt": grvt_feed, "binance-all": binance_feed}
+
+
+# ---- OKX: perps + spot en UNA conexión. Sin ping de texto el socket
+# muere en ~30 s (protocolo propio, no estándar WS) — pinger cada 20 s.
+OKX_WS = "wss://ws.okx.com:8443/ws/v5/public"
+OKX_SYMBOLS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP",
+               "BTC-USDT", "ETH-USDT"]
+
+async def okx_feed(_, on_event, stop):
+    async with aiohttp.ClientSession() as s:
+        async with s.ws_connect(OKX_WS, heartbeat=None) as ws:
+            args = [{"channel": "trades", "instId": i} for i in OKX_SYMBOLS]
+            args += [{"channel": "books5", "instId": "BTC-USDT-SWAP"},
+                     {"channel": "books5", "instId": "BTC-USDT"}]
+            await ws.send_str(json.dumps({"op": "subscribe", "args": args}))
+            on_event({"type": "notice", "venue": "okx",
+                      "msg": f"perps+spot: {len(OKX_SYMBOLS)} instrumentos"})
+
+            async def pinger():
+                while not stop.is_set():
+                    await ws.send_str("ping")
+                    await asyncio.sleep(20)
+            asyncio.get_event_loop().create_task(pinger())
+            async for msg in ws:
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        raise ConnectionError("ws cerrado")
+                    continue
+                if stop.is_set():
+                    return
+                try:
+                    m = json.loads(msg.data)
+                    if m == "pong" or "event" in m:
+                        continue
+                    ch, rows = m["arg"]["channel"], m.get("data") or []
+                    inst = m["arg"]["instId"].lower()
+                    for r in rows:
+                        if ch == "trades":
+                            on_event({"type": "print", "venue": f"okx:{inst}",
+                                      "sec": int(r["ts"]) // 1000,
+                                      "px": float(r["px"])})
+                        elif ch == "books5":
+                            on_event({"type": "quote", "venue": f"okx:{inst}",
+                                      "bid": float(r["bids"][0][0]),
+                                      "ask": float(r["asks"][0][0])})
+                except Exception:
+                    pass
+
+
+# ---- Bybit perps lineales (v5): trade + libro 1 nivel. Ping por op. ----
+BYBIT_WS = "wss://stream.bybit.com/v5/public/linear"
+BYBIT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+
+async def bybit_feed(_, on_event, stop):
+    async with aiohttp.ClientSession() as s:
+        async with s.ws_connect(BYBIT_WS, heartbeat=None) as ws:
+            args = [f"publicTrade.{i}" for i in BYBIT_SYMBOLS]
+            args += [f"orderbook.1.{i}" for i in BYBIT_SYMBOLS[:2]]
+            await ws.send_str(json.dumps({"op": "subscribe", "args": args}))
+            on_event({"type": "notice", "venue": "bybit",
+                      "msg": f"perps: {len(BYBIT_SYMBOLS)} símbolos"})
+
+            async def pinger():
+                while not stop.is_set():
+                    await ws.send_str(json.dumps({"op": "ping"}))
+                    await asyncio.sleep(20)
+            asyncio.get_event_loop().create_task(pinger())
+            async for msg in ws:
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        raise ConnectionError("ws cerrado")
+                    continue
+                if stop.is_set():
+                    return
+                try:
+                    m = json.loads(msg.data)
+                    topic, rows = m.get("topic", ""), m.get("data") or []
+                    if topic.startswith("publicTrade."):
+                        sym = topic.split(".")[1].lower()
+                        for r in rows:
+                            on_event({"type": "print", "venue": f"bybit:{sym}",
+                                      "sec": int(r["T"]) // 1000,
+                                      "px": float(r["p"])})
+                    elif topic.startswith("orderbook.1."):
+                        sym = topic.split(".")[2].lower()
+                        on_event({"type": "quote", "venue": f"bybit:{sym}",
+                                  "bid": float(rows[0][0]),
+                                  "ask": float(rows[-1][0])})
+                except Exception:
+                    pass
+
+
+# ---- Coinbase spot (el venue US más regulado): matches. ----
+COINBASE_WS = "wss://ws-feed.exchange.coinbase.com"
+COINBASE_PRODUCTS = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD"]
+
+async def coinbase_feed(_, on_event, stop):
+    async with aiohttp.ClientSession() as s:
+        async with s.ws_connect(COINBASE_WS, heartbeat=20) as ws:
+            await ws.send_str(json.dumps({
+                "type": "subscribe", "product_ids": COINBASE_PRODUCTS,
+                "channels": ["matches"]}))
+            on_event({"type": "notice", "venue": "coinbase",
+                      "msg": f"spot: {len(COINBASE_PRODUCTS)} productos"})
+            async for msg in ws:
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        raise ConnectionError("ws cerrado")
+                    continue
+                if stop.is_set():
+                    return
+                try:
+                    r = json.loads(msg.data)
+                    if r.get("type") == "match":
+                        on_event({"type": "print",
+                                  "venue": "coinbase:" + r["product_id"].lower(),
+                                  "sec": int(datetime.datetime
+                                             .fromisoformat(r["time"].replace("Z", "+00:00"))
+                                             .timestamp()),
+                                  "px": float(r["price"])})
+                except Exception:
+                    pass
+
+
+# ---- Kraken spot (v2): trade + heartbeat propio del canal. ----
+KRAKEN_WS = "wss://ws.kraken.com/v2"
+KRAKEN_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"]
+
+async def kraken_feed(_, on_event, stop):
+    async with aiohttp.ClientSession() as s:
+        async with s.ws_connect(KRAKEN_WS, heartbeat=20) as ws:
+            await ws.send_str(json.dumps({
+                "method": "subscribe",
+                "params": {"channel": "trade", "symbol": KRAKEN_SYMBOLS}}))
+            on_event({"type": "notice", "venue": "kraken",
+                      "msg": f"spot: {len(KRAKEN_SYMBOLS)} pares"})
+            async for msg in ws:
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        raise ConnectionError("ws cerrado")
+                    continue
+                if stop.is_set():
+                    return
+                try:
+                    m = json.loads(msg.data)
+                    for r in (m.get("data") or []):
+                        if m.get("channel") == "trade":
+                            sym = r["symbol"].lower().replace("/", "-")
+                            on_event({"type": "print", "venue": f"kraken:{sym}",
+                                      "sec": int(r["timestamp"]) // 1000,
+                                      "px": float(r["price"])})
+                except Exception:
+                    pass
+
+
+FEEDS.update({"okx": okx_feed, "bybit": bybit_feed,
+              "coinbase": coinbase_feed, "kraken": kraken_feed})
 
 async def run_feed(venue, instrument, on_event, stop):
     """Reconnecting wrapper: a feed that stays down is not an option."""

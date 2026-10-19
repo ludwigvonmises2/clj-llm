@@ -40,6 +40,7 @@
   .phead .inst{font:11px var(--mono);color:var(--mut)}
   .phead .state{font:11px var(--mono);padding:2px 8px;border-radius:3px;border:1px solid var(--line2);color:var(--mut)}
   .phead .state.long{color:var(--up);border-color:var(--up)}
+  .phead .state.short{color:var(--down);border-color:var(--down)}
   .flat{margin-left:auto;background:color-mix(in srgb,var(--down) 14%,var(--ink));
         color:var(--down);border:1px solid var(--down);font-size:11.5px;font-weight:600;
         padding:4px 12px;border-radius:3px}
@@ -189,21 +190,25 @@ function applyBar(ev) {
   const arr = V.candles_data, last = arr[arr.length-1];
   if (last && last.time === t) arr[arr.length-1] = bar; else arr.push(bar);
   if (V.candles_data.length > 3600) V.candles_data.splice(0, 600);
-  V.eq_data.push({time:t, value:ev.target});
-  if (V.eq_data.length > 3600) V.eq_data.splice(0, 600);
-  if (V.cells.pos) {
+  if (V.cells.pos && ev.position !== undefined) {
     V.cells.pos.textContent = (+ev.position).toFixed(4);
-    V.cells.pos.parentElement.className = 'm ' + (ev.position > 0 ? 'pos' : '');
+    V.cells.pos.parentElement.className = 'm ' +
+      (ev.position > 0 ? 'pos' : ev.position < 0 ? 'neg' : '');
   }
-  if (V.cells.tg) V.cells.tg.textContent = (+ev.target).toFixed(4);
+  if (ev.target !== undefined) {
+    if (V.cells.tg) V.cells.tg.textContent = (+ev.target).toFixed(4);
+    V.eq_data.push({time:t, value:ev.target});
+    if (V.eq_data.length > 3600) V.eq_data.splice(0, 600);
+    V.eq.update({time:t, value:ev.target});
+  }
   if (ev.z !== undefined && V.cells.z) V.cells.z.textContent = ev.z.toFixed(2);
   if (ev.state !== undefined) {
-    V.els.state.textContent = ev.state ? 'LONG' : 'flat';
-    V.els.state.classList.toggle('long', !!ev.state);
+    V.els.state.textContent = ev.state > 0 ? 'LONG' : ev.state < 0 ? 'SHORT' : 'flat';
+    V.els.state.classList.toggle('long', ev.state > 0);
+    V.els.state.classList.toggle('short', ev.state < 0);
   }
   // live update (setData only on connect/history)
   V.candles.update(bar);
-  V.eq.update({time:t, value:ev.target});
   V.metaDirty = true;
 }
 
@@ -239,7 +244,12 @@ const ws = new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${locatio
     let ev; try { ev = JSON.parse(e.data); } catch { return; }
     events++;
     if (ev.type === 'error') errors++;
-    const V = VENUES[ev.venue]; if (!V) return;
+    // los prints de venues de datos llegan con tag "okx:btc-usdt-swap":
+    // caen en el panel de la venue base
+    const base = (ev.venue || '').split(':')[0];
+    const V = VENUES[ev.venue] || VENUES[base]; if (!V) return;
+    if (ev.type === 'print') { applyBar({venue: base, ts: ev.sec * 1000,
+      close: ev.px, position: V.position || 0}); return; }
     if (ev.type === 'history') {
       const t = Math.floor(ev.ts/1000);
       V.candles_data.push({time:t, open:ev.close, high:ev.close, low:ev.close, close:ev.close});

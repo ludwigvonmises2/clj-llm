@@ -24,7 +24,11 @@ curl localhost:7777/api/health           # ¿todo corre? edades por pieza
 
 1. **Todo lo que decide, mide o verifica va en Clojure** — la señal es
    SIEMPRE `signals/mr-zscore` (kaocha-tested); jamás duplicar la señal
-   en otro lenguaje (la copia Python del validador fue contaminación).
+   en otro lenguaje (la copia Python del validador y `engine.py`
+   fueron eliminados como contaminación). Las venues Python son
+   ejecutores: reciben órdenes ya decididas por `/order/{venue}` y
+   NUNCA calculan targets. El test de frontera en `test/` escanea
+   `live/*.py` y rompe el build si aparece matemática de decisión.
 2. **El venue es la fuente de verdad**: posición sembrada al arranque,
    reconciliada cada 10 s; la UI muestra lo que el venue dice.
 3. **Sin futuro por construcción**: señal de la barra i gana el retorno

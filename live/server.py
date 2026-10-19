@@ -10,7 +10,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from aiohttp import web, WSMsgType
-import alpaca_live, virtual_live
+import alpaca_live
+import executors
 import store
 
 clients = set()
@@ -20,10 +21,17 @@ loop = None  # main asyncio loop, set at startup
 # run(on_event, dry) + STATE{pos,api,instrument}. Adding one is a new
 # module here + a line — no server changes anywhere else.
 VENUES = [
-    {"id": "grvt",     "module": None,             "label": "GRVT · BTC testnet", "brain": "clojure",
+    {"id": "grvt",     "label": "GRVT · BTC testnet REAL", "brain": "clojure",
      "feed": "BTC_USDT_Perp"},
-    {"id": "alpaca",   "module": "alpaca_live",  "label": "Alpaca · BTC paper", "brain": "python"},
-    {"id": "binance-v","module": "virtual_live", "label": "Binance · virtual ULTRA", "brain": "python"},
+    {"id": "alpaca",   "module": "alpaca_live", "label": "Alpaca · BTC paper REAL", "brain": "python"},
+    {"id": "binance-v","executor": "binance:btcusdt", "instrument": "BTCUSDT",
+     "label": "Binance · virtual ULTRA"},
+    {"id": "okx-v",    "executor": "okx:btc-usdt-swap", "instrument": "BTC-USDT-SWAP",
+     "label": "OKX · perp virtual ULTRA (L/S)"},
+    {"id": "okx",      "feed": "BTC-USDT-SWAP", "label": "OKX · datos perp+spot"},
+    {"id": "bybit",    "feed": "BTCUSDT", "label": "Bybit · datos perps"},
+    {"id": "coinbase", "feed": "BTC-USD", "label": "Coinbase · datos spot"},
+    {"id": "kraken",   "feed": "BTC/USD", "label": "Kraken · datos spot"},
 ]
 
 pre_loop_queue = []
@@ -31,9 +39,10 @@ pre_loop_queue = []
 def broadcast(ev):
     ev = dict(ev)
     ev.setdefault("venue", "sistema")
-    if ev.get("type") in ("print", "quote"):
-        try: store.tape(ev["venue"], ev)
-        except Exception: pass
+    # las cintas las escribe UN dueño: el recorder (capa 0). El desk
+    # solo retransmite: UI, cerebro y venues virtuales por relé interno.
+    import relay
+    relay.publish(ev)
     if loop is None:
         pre_loop_queue.append(ev)   # se difunden en cuanto exista el loop
         return
@@ -55,6 +64,17 @@ async def flatten(request):
     venue = request.match_info["venue"]
     v = next((v for v in VENUES if v["id"] == venue), None)
     if not v: return web.json_response({"ok": False, "msg": "venue desconocido"})
+    # venues virtuales: flatten long o short vía el ejecutor
+    if v.get("executor"):
+        st = v["state"]; pos = st["pos"]
+        if abs(pos) > 1e-9:
+            r = executors.execute(st, "sell" if pos > 0 else "buy",
+                                  abs(pos), why="flatten")
+            ok, msg = r.get("ok", False), f"flatten {pos} enviado"
+        else:
+            ok, msg = True, "posición ya plana"
+        broadcast({"type": "notice", "venue": venue, "msg": msg})
+        return web.json_response({"ok": ok, "msg": msg})
     api = (v.get("state") or {}).get("api")
     inst = (v.get("state") or {}).get("instrument")
     pos = (v.get("state") or {}).get("pos", 0.0)
@@ -79,12 +99,28 @@ async def flatten(request):
     return web.json_response({"ok": ok, "msg": msg})
 
 async def place_order(request):
-    """Execution gateway: the Clojure brain decides, the SDK signs."""
+    """Execution gateway: the Clojure brain decides, this signs/fills."""
     venue = request.match_info["venue"]
     body = await request.json()
     v = next((v for v in VENUES if v["id"] == venue), None)
     if not v: return web.json_response({"ok": False, "msg": "venue desconocido"})
     side = body.get("side"); qty = float(body.get("qty") or 0)
+    why = body.get("why", "signal")
+    # venue virtual: el ejecutor ULTRA hace el fill (largo o corto)
+    if v.get("executor"):
+        import executors
+        r = executors.execute(v["state"], side, qty, why=why)
+        if r.get("ok"):
+            store.order(venue, int(time.time() * 1000), side, qty,
+                        r["avg_px"], f"{venue}-{int(time.time() * 1000)}",
+                        z=body.get("z"), target=body.get("target"),
+                        spread=body.get("spread"), why=why)
+            return web.json_response({"ok": True,
+                                      "avg_px": round(r["avg_px"], 2),
+                                      "fee": round(r["fee"], 3),
+                                      "slippage_bps": round(r["slippage_bps"], 2),
+                                      "pos": round(r["pos"], 6)})
+        return web.json_response({"ok": False, "msg": r.get("msg", "fill falló")})
     inst = body.get("instrument") or v["state"].get("instrument")
     api = (v.get("state") or {}).get("api")
     if api is None: return web.json_response({"ok": False, "msg": "engine no disponible"})
@@ -237,9 +273,17 @@ def main():
             v["state"] = {"pos": 0.0, "api": grvt_client(),
                           "instrument": "BTC_USDT_Perp"}
             continue
-        mod = importlib.import_module(v["module"])
-        v["state"] = mod.STATE
-        start_engine(v["id"], mod, dry=dry)
+        if v.get("module"):
+            mod = importlib.import_module(v["module"])
+            v["state"] = mod.STATE
+            start_engine(v["id"], mod, dry=dry)
+    # venues virtuales: solo EJECUTAN (la decisión vive en el cerebro)
+    import executors
+    for v in VENUES:
+        if v.get("executor"):
+            st = executors.make_state(v["instrument"])
+            v["state"] = st
+            executors.start_drainer(v["executor"], st)
     for v in VENUES:
         if v.get("feed"):
             threading.Thread(target=feed_thread, daemon=True,

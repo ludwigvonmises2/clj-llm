@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
-"""Alpaca PAPER live engine — trade STREAM push, 1s bars, real paper
-orders through the official alpaca-py SDK.
+"""Alpaca PAPER venue — OWN data (REST crypto bars, this venue's
+microstructure) + OWN execution (official alpaca-py SDK).
 
-asset     : most active crypto pair, measured at boot over a 5-minute
-            trade window (BTC/USD on every measurement so far).
-latency   : trades arrive via the SDK's async CryptoDataStream (push);
-            no REST polling anywhere in the live path.
-signal    : same validated mr-dip DipEngine as GRVT (imported), 1s bars.
-robustness: stream reconnect with capped backoff; error budget flattens
-            and stops; position seeded from the venue.
-"""
-import sys, json, time, math, asyncio, datetime as dt
+NO decision math here (house rule 1): the module streams closed 1m bars
+to the relay; the Clojure brain decides and routes orders back through
+the gateway, which signs with the SDK session in STATE["api"]."""
+import sys, os, json, time, datetime as dt
 
-sys.path.insert(0, __file__.rsplit("/", 1)[0])
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import store
-from engine import DipEngine
 
 ENV_PATH = "/home/a/work/stock-screener/.env"
 KEYS = {}
@@ -24,50 +18,15 @@ for line in open(ENV_PATH):
         KEYS[k] = v
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from alpaca.data.requests import CryptoTradesRequest
-
-CANDIDATES = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD"]
 
 STATE = {"pos": 0.0, "api": None, "instrument": "BTC/USD"}
-api = TradingClient(KEYS["ALPACA_API_KEY_ID"], KEYS["ALPACA_API_SECRET_KEY"], paper=True)
-hist = CryptoHistoricalDataClient(KEYS["ALPACA_API_KEY_ID"], KEYS["ALPACA_API_SECRET_KEY"])
-
-def pick_most_active(on_event):
-    end = dt.datetime.now(dt.timezone.utc)
-    best, bestv = CANDIDATES[0], -1.0
-    for s in CANDIDATES:
-        try:
-            r = hist.get_crypto_trades(CryptoTradesRequest(
-                symbol_or_symbols=s, start=end - dt.timedelta(minutes=5), end=end))
-            vol = sum(float(t.size) * float(t.price) for t in r.data.get(s, []))
-            on_event({"type": "notice", "venue": "alpaca",
-                      "msg": f"{s}: {vol:,.0f} USDT en 5 min"})
-            if vol > bestv:
-                best, bestv = s, vol
-        except Exception as e:
-            on_event({"type": "notice", "venue": "alpaca",
-                      "msg": f"{s}: sin datos ({str(e)[:50]})"})
-    return best
-
-class BarCloser:
-    def __init__(self):
-        self.sec = None
-        self.px = None
-    def feed(self, sec, px):
-        if self.sec is None:
-            self.sec, self.px = sec, px
-            return None
-        if sec == self.sec:
-            self.px = px
-            return None
-        c = (self.sec, self.px)
-        self.sec, self.px = sec, px
-        return c
+api = TradingClient(KEYS["ALPACA_API_KEY_ID"], KEYS["ALPACA_API_SECRET_KEY"],
+                    paper=True)
+hist = CryptoHistoricalDataClient(KEYS["ALPACA_API_KEY_ID"],
+                                  KEYS["ALPACA_API_SECRET_KEY"])
 
 def venue_position(symbol):
     try:
@@ -78,69 +37,39 @@ def venue_position(symbol):
         pass
     return 0.0
 
-async def run_async(on_event, dry):
-    asset = pick_most_active(on_event)
-    ap_symbol = asset.replace("/", "")
-    STATE["instrument"] = asset
+def run(on_event=None, dry=False):
+    """Data pump: closed 1m bars of Alpaca's own feed → relay."""
+    if on_event is None:
+        on_event = lambda ev: print(json.dumps(ev, default=str), flush=True)
+    emit = lambda ev: on_event(dict(ev, venue="alpaca"))
+    asset = STATE["instrument"]
     STATE["api"] = api
-    STATE["pos"] = venue_position(ap_symbol)
-    eng = DipEngine(mode="swing", ppy=525600)  # swing 1m, params del campeón
-    on_event({"type": "start", "venue": "alpaca", "instrument": asset,
-              "dry": dry, "position": STATE["pos"]})
-    closer = BarCloser()
+    STATE["pos"] = venue_position(asset)
+    emit({"type": "start", "instrument": asset, "dry": dry,
+          "position": STATE["pos"],
+          "data": "velas 1m propias de Alpaca; decisión en el cerebro"})
+    last_ts = 0
     backoff = 1
-
-    def close_bar(sec, px, pos):
-        """Cierra vela 1m y ejecuta en ALPACA con SU cliente."""
-        target, z = eng.on_bar(px)
-        ev = {"type": "bar", "ts": sec * 1000, "close": px,
-              "target": round(target, 4), "position": pos,
-              "z": round(z, 2), "state": eng.state}
-        delta = target - pos
-        if abs(delta) > 1e-9:
-            side = OrderSide.BUY if delta > 0 else OrderSide.SELL
-            pos = target  # intención primero
-            if not dry:
-                try:
-                    api.submit_order(MarketOrderRequest(
-                        symbol=ap_symbol, qty=abs(round(delta, 4)),
-                        side=side, time_in_force=TimeInForce.GTC))
-                    ev["order"] = {"ts": sec * 1000, "side": side.value.lower(),
-                                   "qty": abs(round(delta, 4)), "price": px}
-                except Exception as e:
-                    ev["order_error"] = str(e)[:120]
-            else:
-                ev["order"] = {"ts": sec * 1000, "side": side.value.lower(),
-                               "qty": abs(round(delta, 4)), "price": px, "dry": True}
-        store.bar("alpaca", ev["ts"], px, ev.get("target", 0),
-                  ev.get("z", 0), pos, eng.state)
-        if ev.get("order"):
-            o = ev["order"]
-            store.order("alpaca", o["ts"], o["side"], o["qty"], o.get("price", 0))
-        emit(ev)
-        return pos
-
-    on_event({"type": "notice", "venue": "alpaca",
-              "msg": "datos: stream propio de Alpaca (push) · ejecución: Alpaca paper"})
     while True:
-        stream = CryptoDataStream(KEYS["ALPACA_API_KEY_ID"], KEYS["ALPACA_API_SECRET_KEY"])
-        stream.subscribe_crypto_trades(on_trade)
         try:
-            await stream.run()
+            end = dt.datetime.now(dt.timezone.utc)
+            r = hist.get_crypto_bars(CryptoBarsRequest(
+                symbol_or_symbols=asset, timeframe=TimeFrame.Minute,
+                start=end - dt.timedelta(minutes=3), end=end))
+            for b in r.data.get(asset, []):
+                ts = int(b.timestamp.timestamp() * 1000)
+                if ts > last_ts:
+                    last_ts = ts
+                    emit({"type": "bar", "ts": ts, "close": float(b.close),
+                          "position": STATE["pos"]})
+                    store.bar("alpaca", ts, float(b.close), 0.0, 0.0,
+                              STATE["pos"], 0)
+            time.sleep(10)
+            backoff = 1
         except Exception as e:
-            on_event({"type": "error", "venue": "alpaca", "n": backoff,
-                      "msg": f"feed: {str(e)[:100]}"})
-            await asyncio.sleep(min(30, backoff * 2))
+            emit({"type": "error", "n": backoff, "msg": str(e)[:100]})
+            time.sleep(min(30, backoff * 2))
             backoff = min(backoff + 1, 6)
 
-def run(on_event=None, dry=False):
-    global emit
-    if on_event:
-        emit = lambda ev: on_event(dict(ev, venue="alpaca"))
-    asyncio.run(run_async(on_event, dry))
-
-def main():
-    run(dry="--dry" in sys.argv)
-
 if __name__ == "__main__":
-    main()
+    run()

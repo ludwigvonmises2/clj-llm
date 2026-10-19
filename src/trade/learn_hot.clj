@@ -24,6 +24,15 @@
 (def ^:private ppy-1m 525600)
 (def ^:private cost 0.0005)
 
+(defn parse-closes
+  "Acepta los dos formatos de data/market: mapa con :c (1m) o kline
+  crudo de Binance como vector (close en índice 4) (1s/1h)."
+  [bars]
+  (mapv (fn [b]
+          (Double/parseDouble
+           (str (if (map? b) (:c b) (nth b 4)))))
+        bars))
+
 (def ^:private profiles
   [{:name "conservador" :k 60 :w 360 :threshold 3.0 :ppy ppy-1m :tv 0.30}
    {:name "medio"       :k 40 :w 240 :threshold 2.2 :ppy ppy-1m :tv 0.30}
@@ -81,8 +90,7 @@
   (let [symbol (or (first args) "BTCUSDT")
         hist-path (str "data/market/" symbol "_1m.json")
         bars (json/parse-string (slurp hist-path) true)
-        closes (->> bars
-                    (map #(Double/parseDouble (str (:c %))))
+        closes (->> bars parse-closes
                     (drop (- (count bars) 30000))
                     vec)
         _ (println "corpus:" (count closes) "velas 1m reales")
@@ -196,7 +204,7 @@
     (let [prev (try (edn/read-string (slurp "live/champion.edn"))
                     (catch Exception _ {}))]
       (spit "live/champion.edn"
-            (str (assoc-in (or prev {}) :swing
+            (str (assoc-in (or prev {}) [:swing]
                            {:k (:k campeon) :w (:w campeon)
                             :threshold (:threshold campeon)
                             :name "swing-grid" :wins (:wins campeon)
