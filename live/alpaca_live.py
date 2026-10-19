@@ -14,7 +14,7 @@ import sys, json, time, math, asyncio, datetime as dt
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 import store
-from grvt_live import DipEngine, close_and_maybe_trade, emit
+from engine import DipEngine
 
 ENV_PATH = "/home/a/work/stock-screener/.env"
 KEYS = {}
@@ -27,7 +27,6 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
-from alpaca.data.live import CryptoDataStream
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.requests import CryptoTradesRequest
@@ -91,14 +90,35 @@ async def run_async(on_event, dry):
     closer = BarCloser()
     backoff = 1
 
-    async def on_trade(trade):
-        px = float(trade.price)
-        sec = int(trade.timestamp.timestamp())
-        closed = closer.feed(sec, px)
-        if closed:
-            pos = close_and_maybe_trade(eng, closed[0], closed[1],
-                                        STATE["pos"], dry, on_event)
-            STATE["pos"] = pos
+    def close_bar(sec, px, pos):
+        """Cierra vela 1m y ejecuta en ALPACA con SU cliente."""
+        target, z = eng.on_bar(px)
+        ev = {"type": "bar", "ts": sec * 1000, "close": px,
+              "target": round(target, 4), "position": pos,
+              "z": round(z, 2), "state": eng.state}
+        delta = target - pos
+        if abs(delta) > 1e-9:
+            side = OrderSide.BUY if delta > 0 else OrderSide.SELL
+            pos = target  # intención primero
+            if not dry:
+                try:
+                    api.submit_order(MarketOrderRequest(
+                        symbol=ap_symbol, qty=abs(round(delta, 4)),
+                        side=side, time_in_force=TimeInForce.GTC))
+                    ev["order"] = {"ts": sec * 1000, "side": side.value.lower(),
+                                   "qty": abs(round(delta, 4)), "price": px}
+                except Exception as e:
+                    ev["order_error"] = str(e)[:120]
+            else:
+                ev["order"] = {"ts": sec * 1000, "side": side.value.lower(),
+                               "qty": abs(round(delta, 4)), "price": px, "dry": True}
+        store.bar("alpaca", ev["ts"], px, ev.get("target", 0),
+                  ev.get("z", 0), pos, eng.state)
+        if ev.get("order"):
+            o = ev["order"]
+            store.order("alpaca", o["ts"], o["side"], o["qty"], o.get("price", 0))
+        emit(ev)
+        return pos
 
     on_event({"type": "notice", "venue": "alpaca",
               "msg": "datos: stream propio de Alpaca (push) · ejecución: Alpaca paper"})

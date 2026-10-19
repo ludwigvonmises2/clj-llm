@@ -13,6 +13,7 @@
 
   Run: clojure -M -m trade.live-clojure [--dry]"
   (:require [clojure.string :as str]
+            [clojure.edn :as edn]
             [cheshire.core :as json]
             [trade.signals :as signals]
             [trade.live :as live])
@@ -24,11 +25,14 @@
 (set! *warn-on-reflection* true)
 
 (def instrument "BTC_USDT_Perp")
-(def ws-url "wss://market-data.testnet.grvt.io/ws/full")
+(def ws-url "ws://localhost:7777/ws")  ; feed interno del desk
 (def gateway-url "http://localhost:7777")
-(def k 20)                          ; SCALP: 20s momentum
-(def w 120)                         ; SCALP: 2 min vol window
-(def threshold 1.5)                 ; SCALP AGRESIVO
+;; params del campeón: EDN nativo Clojure, recargable en caliente
+(def params
+  (atom (try
+          (-> (clojure.edn/read-string (slurp "live/champion.edn"))
+              (select-keys [:k :w :threshold]))
+          (catch Exception _ {:k 20 :w 120 :threshold 1.5}))))
 (def max-lev 2.0)
 (def ppy 31536000)                  ; 1s bars
 (def target-vol 0.30)
@@ -38,6 +42,19 @@
 (def error-budget 12)
 
 (defn now-ms [] (System/currentTimeMillis))
+
+(defn git-sha
+  "Versión exacta del código que decide: sin ella una sesión no es
+  reproducible."
+  []
+  (try
+    (let [pb (doto (ProcessBuilder. ["git" "rev-parse" "--short" "HEAD"])
+               (.directory (java.io.File. ".")))
+          p (.start pb)
+          _ (.waitFor p)
+          out (slurp (.getInputStream p))]
+      (str/trim out))
+    (catch Exception _ "unknown")))
 
 (defn append! [path s]
   (Files/write (Paths/get path (into-array String []))
@@ -57,7 +74,20 @@
 
 (def last-order-at (atom 0))
 
-(defn venue-order! [side qty]
+(defn z-of
+  "El z del instante, para auditar cada decisión con su contexto."
+  [closes k w]
+  (let [n (count closes)]
+    (if (< n w) 0.0
+        (let [lr (fn [i] (- (Math/log (nth closes i)) (Math/log (nth closes (dec i)))))
+              sk (reduce + (map lr (range (inc (- n k)) n)))
+              rw (map lr (range (inc (- n w)) n))
+              m (double (/ (reduce + rw) (double w)))
+              sd (Math/sqrt (/ (reduce + (map (fn [v] (let [d (- v m)] (* d d))) rw))
+                               (double (dec w))))]
+          (if (pos? sd) (/ sk (* sd (Math/sqrt (double k)))) 0.0)))))
+
+(defn venue-order! [side qty ctx]
   (let [now (now-ms)]
     (if (< (- now @last-order-at) min-order-gap-ms)
       {:ok false :msg "throttled"}
@@ -66,7 +96,11 @@
         (try
           (json/parse-string
            (post! (str gateway-url "/order/grvt")
-                  (json/generate-string {:side side :qty (double qty)}))
+                  (json/generate-string {:side side :qty (double qty)
+                                         :z (double (or (:z ctx) 0.0))
+                                         :target (double (or (:target ctx) 0.0))
+                                         :spread (double (or (:spread ctx) 0.0))
+                                         :why (str (or (:why ctx) "scalp"))}))
            true)
           (catch Exception e
             {:ok false :msg (.getMessage e)}))))))
@@ -79,7 +113,8 @@
     (catch Exception _ 0.0)))
 
 (defn -main [& args]
-  (let [dry (some #{"--dry"} args)
+  (let [{:keys [k w threshold]} @params
+        dry (some #{"--dry"} args)
         closes (atom [])
         position (atom (venue-position!))
         ignited (atom false)
@@ -88,6 +123,7 @@
                    :peak 1.0 :eq 1.0 :rets [] :tick 0})
         errors (atom 0)
         last-msg-ms (atom (now-ms))
+        pending (atom (StringBuilder.))   ; los mensajes largos llegan fragmentados
         emit (fn [ev]
                (append! "live/clj_events.jsonl" (json/generate-string ev))
                (println (str (java.time.Instant/ofEpochMilli (now-ms)) " "
@@ -101,6 +137,7 @@
                  (let [n (count @closes)]
                    (when (>= n w)
                      (let [closes-v (vec @closes)
+                           z-now (z-of closes-v k w)
                            sigs (signals/mr-zscore
                                  {:closes closes-v :k k :w w :threshold threshold
                                   :side :long-dip :target-vol target-vol
@@ -113,7 +150,7 @@
                                         (* 10000.0 (/ (- ask bid) bid))
                                         9999.0)]
                        (emit {:type "bar" :ts (* sec 1000) :close px
-                              :target newpos :position pos
+                              :target newpos :position pos :z z-now
                               :spread (when (< spread-bps 9000.0)
                                         (format "%.1f" spread-bps))})
                        ;; mark-to-market de la sesión
@@ -154,85 +191,81 @@
                                     :maxdd (double (max 0.0 (- 1.0 (/ eq2 new-peak))))
                                     :wins (:wins @mtm) :trips (:trips @mtm)}))))
                        ;; ignition + señal, con compuerta de spread
-                       (let [gate-blocked (and (pos? delta) (> spread-bps max-spread-bps))]
+                       (let [known-spread (< spread-bps 9000.0)
+                             gate-blocked (and known-spread
+                                               (pos? delta)
+                                               (> spread-bps max-spread-bps))]
                          (cond
                            ;; primera posición del desk, en el minuto uno
                            (and (zero? pos) (not @ignited))
                            (do (reset! ignited true)
-                               (let [r (venue-order! "buy" 0.002)]
+                               (let [r (venue-order! "buy" 0.002
+                                                     {:z z-now :target newpos
+                                                      :spread spread-bps :why "ignition"})]
                                  (emit {:type "order" :venue "grvt" :side "buy"
-                                        :qty 0.002 :px px :why "ignition"
+                                        :qty 0.002 :px px :why "ignition" :z z-now
                                         :resp (str r)})
                                  (if (:ok r) 0.002 pos)))
                            ;; señal scalping, respetando la compuerta
                            (> (Math/abs ^double delta) 1e-9)
                            (let [side (if (pos? delta) "buy" "sell")]
                              (if gate-blocked
-                             (do (emit {:type "notice" :venue "grvt"
-                                        :msg (format "entrada retenida: spread %.1f bps"
-                                                     spread-bps)})
-                                 pos)
-                               (let [r (venue-order! side (Math/abs ^double delta))]
+                               (do (emit {:type "notice" :venue "grvt"
+                                          :msg (format "entrada retenida: spread %.1f bps"
+                                                       spread-bps)})
+                                   pos)
+                               (let [r (venue-order! side (Math/abs ^double delta)
+                                                     {:z z-now :target newpos
+                                                      :spread spread-bps :why "scalp"})]
                                  (emit {:type "order" :venue "grvt" :side side
-                                        :qty (Math/abs ^double delta) :px px
+                                        :qty (Math/abs ^double delta) :px px :z z-now
                                         :resp (str r)})
                                  (if (:ok r) newpos pos))))
                            :else pos))))
                    pos))]
     (emit {:type "start" :venue "grvt" :instrument instrument
-           :dry dry :position @position :data "GRVT prints + L2 (mismo venue)"})
-    ;; feeds del PROPIO venue: prints -> velas 1s; mini book -> spread
+           :dry dry :position @position :git (git-sha)
+           :data "GRVT prints + L2 (mismo venue)"})
+    ;; feed del PROPIO venue por relé del desk (dueño único del WS):
+    ;; prints -> velas 1s; quotes -> spread. El cerebro jamás toca el venue.
     (let [closer (atom {:sec nil :px nil})
           listener (reify WebSocket$Listener
                      (onOpen [this ws]
-                       (.request ws 1)
-                       (doseq [[i stream sel]
-                               [["v1.trade" (str instrument "@50")]
-                                ["v1.mini.s" (str instrument "@1")]]]
-                         (.sendText ws
-                                    (json/generate-string
-                                     {:jsonrpc "2.0" :method "subscribe"
-                                      :id (str "s" i)
-                                      :params {:stream stream :selectors [sel]}})
-                                    true)))
+                       (.request ws 1))
                      (onText [this ws data last]
                        (.request ws 1)
                        (reset! last-msg-ms (now-ms))
-                       (try
-                         (let [m (json/parse-string (str data) true)
-                               method (:method m)
-                               params (:params m)]
-                           (when (and method (str/starts-with? method "v1."))
-                             (doseq [t (:data params)]
-                               (cond
-                                 (= method "v1.trade")
-                                 (let [px (Double/parseDouble (str (:price t)))
-                                       sec (quot (Long/parseLong (str (:event_time t)))
-                                                 1000000000)
-                                       cur @closer]
-                                   (cond
-                                     (nil? (:sec cur))
-                                     (reset! closer {:sec sec :px px})
-                                     (= sec (:sec cur))
-                                     (reset! closer {:sec sec :px px})
-                                     :else
-                                     (let [newpos (decide {:sec (:sec cur)
-                                                           :px (:px cur)
-                                                           :pos @position
-                                                           :bid (:bid @bid-ask)
-                                                           :ask (:ask @bid-ask)})]
-                                       (reset! position newpos)
-                                       (reset! closer {:sec sec :px px}))))
-                                 (= method "v1.mini.s")
-                                 (let [b (some-> (:bid_price t) str Double/parseDouble)
-                                       a (some-> (:ask_price t) str Double/parseDouble)]
-                                   (when (and b a (pos? b))
-                                     (swap! bid-ask assoc :bid b :ask a)))))))
-                         (catch Exception e
-                           (swap! errors inc)
-                           (when (>= @errors error-budget)
-                             (emit {:type "kill" :errors @errors})
-                             (System/exit 1)))))
+                       (doto ^StringBuilder @pending (.append ^CharSequence data))
+                       (when last
+                         (let [s (str (doto ^StringBuilder @pending (.setLength 0)))]
+                           (try
+                             (let [m (json/parse-string s true)
+                                   t (:type m)]
+                               (when (= (:venue m) "grvt")
+                                 (cond
+                                   (= t "print")
+                                   (let [px (double (:px m))
+                                         sec (long (:sec m))
+                                         cur @closer]
+                                     (cond
+                                       (nil? (:sec cur))
+                                       (reset! closer {:sec sec :px px})
+                                       (= sec (:sec cur))
+                                       (reset! closer {:sec sec :px px})
+                                       :else
+                                       (let [newpos (decide {:sec (:sec cur)
+                                                             :px (:px cur)
+                                                             :pos @position
+                                                             :bid (:bid @bid-ask)
+                                                             :ask (:ask @bid-ask)})]
+                                         (reset! position newpos)
+                                         (reset! closer {:sec sec :px px}))))
+                                   (= t "quote")
+                                   (let [b (:bid m) a (:ask m)]
+                                     (when (and b a (pos? (double b)))
+                                       (swap! bid-ask assoc :bid b :ask a))))))
+                             (catch Exception e
+                               (println "EXC parse:" (.getMessage e)))))))
                      (onError [this ws err]
                        (emit {:type "error" :venue "grvt" :msg (str err)}))
                      (onClose [this ws code reason]

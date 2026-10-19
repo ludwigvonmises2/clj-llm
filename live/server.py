@@ -10,7 +10,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from aiohttp import web, WSMsgType
-import grvt_live, alpaca_live
+import alpaca_live, virtual_live
 import store
 
 clients = set()
@@ -20,24 +20,24 @@ loop = None  # main asyncio loop, set at startup
 # run(on_event, dry) + STATE{pos,api,instrument}. Adding one is a new
 # module here + a line — no server changes anywhere else.
 VENUES = [
-    {"id": "grvt",     "module": "grvt_live",    "label": "GRVT · BTC testnet", "brain": "clojure"},
+    {"id": "grvt",     "module": None,             "label": "GRVT · BTC testnet", "brain": "clojure",
+     "feed": "BTC_USDT_Perp"},
     {"id": "alpaca",   "module": "alpaca_live",  "label": "Alpaca · BTC paper", "brain": "python"},
     {"id": "binance-v","module": "virtual_live", "label": "Binance · virtual ULTRA", "brain": "python"},
 ]
 
+pre_loop_queue = []
+
 def broadcast(ev):
     ev = dict(ev)
     ev.setdefault("venue", "sistema")
+    if ev.get("type") in ("print", "quote"):
+        try: store.tape(ev["venue"], ev)
+        except Exception: pass
     if loop is None:
-        return   # eventos pre-servidor: se pierden, el hilo sigue vivo
-    msg = json.dumps(ev, default=str)
-    async def push():
-        dead = []
-        for ws in clients:
-            try: await ws.send_str(msg)
-            except Exception: dead.append(ws)
-        for ws in dead: clients.discard(ws)
-    asyncio.run_coroutine_threadsafe(push(), loop)
+        pre_loop_queue.append(ev)   # se difunden en cuanto exista el loop
+        return
+    asyncio.run_coroutine_threadsafe(_push(json.dumps(ev, default=str)), loop)
 
 def start_engine(venue_id, mod, dry=False):
     def worker():
@@ -100,7 +100,10 @@ async def place_order(request):
                 side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
                 time_in_force=TimeInForce.GTC))
             resp = {"order_id": str(o.id)[:40]}
-        store.order(venue, int(time.time() * 1000), side, qty, 0.0, resp.get("order_id"))
+        store.order(venue, int(time.time() * 1000), side, qty, 0.0,
+                    resp.get("order_id"), z=body.get("z"),
+                    target=body.get("target"), spread=body.get("spread"),
+                    why=body.get("why", "scalp"))
         return web.json_response({"ok": True, **resp})
     except Exception as e:
         return web.json_response({"ok": False, "msg": str(e)[:160]})
@@ -188,6 +191,26 @@ async def libcharts(request):
 async def _capture_loop(app):
     global loop
     loop = asyncio.get_running_loop()
+    # drenar la cola pre-loop POR EL LOOP: los hilos nunca tocan aiohttp
+    for ev2 in pre_loop_queue:
+        await _push(dict(ev2, replay=True))
+    pre_loop_queue.clear()
+
+async def _push(msg):
+    dead = []
+    for ws in clients:
+        try: await ws.send_str(msg)
+        except Exception: dead.append(ws)
+    for ws in dead: clients.discard(ws)
+
+def feed_thread(venue_id, feed_spec):
+    """Un hilo por feed: el ÚNICO suscriptor del WS de ese venue."""
+    loop2 = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop2)
+    import feeds
+    stop = asyncio.Event()
+    loop2.run_until_complete(feeds.run_feed(venue_id, feed_spec,
+                                            broadcast, stop))
 
 def main():
     dry = "--dry" in sys.argv
@@ -196,6 +219,7 @@ def main():
     app.router.add_get("/", index)
     app.router.add_get("/lib.charts.js", libcharts)
     app.router.add_get("/api/venues", api_venues)
+    app.router.add_get("/api/health", health)
     app.router.add_get("/ws", ws_handler)
     app.router.add_post("/flatten/{venue}", flatten)
     app.router.add_post("/order/{venue}", place_order)
@@ -207,10 +231,21 @@ def main():
     clojure_ids = {v["id"] for v in VENUES if v.get("brain") == "clojure"}
     for v in VENUES:
         if v["id"] in clojure_ids:
-            continue    # su decisión vive en trade.live-clojure (nuestro Clojure)
+            # sesión SDK para que la PASARELA firme las órdenes que el
+            # cerebro Clojure decide (el cerebro nunca firma)
+            from grvt_sdk_order import client as grvt_client
+            v["state"] = {"pos": 0.0, "api": grvt_client(),
+                          "instrument": "BTC_USDT_Perp"}
+            continue
         mod = importlib.import_module(v["module"])
         v["state"] = mod.STATE
         start_engine(v["id"], mod, dry=dry)
+    for v in VENUES:
+        if v.get("feed"):
+            threading.Thread(target=feed_thread, daemon=True,
+                             args=(v["id"], v["feed"])).start()
+    threading.Thread(target=feed_thread, daemon=True,
+                     args=("binance-all", "BTCUSDT")).start()
     if clojure_ids:
         def tail():
             p = os.path.join(HERE, "clj_events.jsonl")
@@ -232,6 +267,25 @@ def main():
                         time.sleep(0.3)
         threading.Thread(target=tail, daemon=True).start()
     web.run_app(app, port=7777, print=None)
+
+async def health(request):
+    """¿Todo corre? Edad de cada pieza en un vistazo."""
+    import time as _t
+    hb = None
+    try: hb = _t.time() - int(open("/tmp/feed_heartbeat").read())
+    except Exception: pass
+    last_bar = None
+    try:
+        import sqlite3
+        c = sqlite3.connect("desk.db")
+        row = c.execute("SELECT MAX(ts) FROM bars").fetchone()[0]
+        last_bar = (_t.time() - row / 1000) if row else None
+    except Exception: pass
+    return web.json_response({
+        "feed_hb_s": hb,
+        "last_bar_s": last_bar,
+        "learner_log": os.path.exists("/tmp/learning_log.jsonl"),
+        "clients_ws": len(clients)})
 
 async def api_venues(request):
     out = []

@@ -2,7 +2,7 @@
 """Desk memory: SQLite (WAL) — bars, orders and events persist across
 restarts, and a freshly connected dashboard replays the session so far.
 stdlib sqlite3 only; one connection per writer thread."""
-import sqlite3, os, time, threading, json
+import sqlite3, os, time, threading, json, glob
 
 DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "desk.db")
 _local = threading.local()
@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS bars(
   ts INTEGER, venue TEXT, close REAL, target REAL, z REAL,
   position REAL, state INTEGER, PRIMARY KEY (venue, ts));
 CREATE TABLE IF NOT EXISTS orders(
-  ts INTEGER, venue TEXT, side TEXT, qty REAL, price REAL, resp TEXT);
+  ts INTEGER, venue TEXT, side TEXT, qty REAL, price REAL, resp TEXT,
+  z REAL, target REAL, spread REAL, why TEXT);
 CREATE TABLE IF NOT EXISTS events(
   ts INTEGER, venue TEXT, type TEXT, msg TEXT);
 CREATE INDEX IF NOT EXISTS idx_bars_vt ON bars(venue, ts);
@@ -36,9 +37,12 @@ def bar(venue, ts, close, target, z, position, state):
         (int(ts), venue, close, target, z, position, int(state)))
     conn().commit()
 
-def order(venue, ts, side, qty, price, resp=""):
-    conn().execute("INSERT INTO orders VALUES (?,?,?,?,?,?)",
-                   (int(ts), venue, side, qty, price, str(resp)[:200]))
+def order(venue, ts, side, qty, price, resp="", z=None, target=None,
+          spread=None, why=""):
+    conn().execute(
+        "INSERT INTO orders VALUES (?,?,?,?,?,COALESCE(?, ''),?,?,?,?,?)",
+        (int(ts), venue, side, qty, price, str(resp)[:200],
+         z, target, spread, str(why)[:60]))
     conn().commit()
 
 def event(venue, type_, msg):
@@ -64,3 +68,14 @@ def stats(venue):
     return {"bars": bars, "orders": orders}
 
 init()
+
+TAPE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tape")
+
+def tape(venue, obj):
+    """Cinta append-only del venue: un JSON por print/quote, rotación
+    diaria. Es la materia prima de la reproducibilidad: re-ejecutar el
+    cerebro sobre esta cinta debe reproducir las mismas decisiones."""
+    os.makedirs(TAPE_DIR, exist_ok=True)
+    day = time.strftime("%Y%m%d", time.gmtime())
+    with open(os.path.join(TAPE_DIR, f"{day}_{venue}.jsonl"), "a") as f:
+        f.write(json.dumps(obj, default=str) + "\n")

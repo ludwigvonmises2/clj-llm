@@ -1,18 +1,6 @@
 {
-  "name": "live",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "@noble/curves": "^2.4.0",
-    "@noble/hashes": "^2.4.0",
-    "ethers": "^6.17.0",
-    "ws": "^8.22.0"
-  }
+  "name": "mr-dip-live",
+  "private": true,
+  "description": "Desk de live trading — dependencias Node eliminadas: el servidor es Python (server.py) y la UI no usa librerías externas",
+  "dependencies": {}
 }

@@ -22,7 +22,7 @@ import sys, json, time, math, random, asyncio
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 import store
 import market_feed
-from grvt_live import DipEngine, emit
+from engine import DipEngine
 
 STATE = {"pos": 0.0, "entry": 0.0, "realized": 0.0, "instrument": "BTCUSDT"}
 FEE = 0.0005          # taker 5 bps
@@ -83,7 +83,7 @@ def virtual_execute(side, qty, decision_px, rv, last):
             "slippage_bps": abs(avg_px / decision_px - 1) * 10000}
 
 async def main_loop(on_event, dry):
-    eng = DipEngine()
+    eng = DipEngine(k=20, w=120, thr=1.5, ppy=31536000)  # scalp 1s
     on_event({"type": "start", "venue": "binance-v", "instrument": "BTCUSDT",
               "dry": dry, "position": STATE["pos"],
               "data": "Binance producción + ejecución virtual ultrarrealista"})

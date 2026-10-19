@@ -1,9 +1,13 @@
 live/.venv-grvt/
 live/node_modules/
 live/desk.db*
+live/*.jsonl
 live/clj_state.json
 live/grvt_state.json
-live/clj_events.jsonl
-live/clj_orders.jsonl
+live/champion.edn
+live/parquet/
+live/tape/
+live/.cpcache/
+.cpcache/
 __pycache__/
 *.log
