@@ -1,0 +1,6 @@
+data/
+.cpcache/
+.lsp/
+.clj-kondo/
+target/
+*.log

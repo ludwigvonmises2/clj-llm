@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "clojure-mcp": {
+      "type": "stdio",
+      "command": "clojure",
+      "args": [
+        "-T:mcp"
+      ],
+      "env": {}
+    }
+  }
+}
