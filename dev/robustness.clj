@@ -55,7 +55,7 @@
   (let [c    (data/closes (data/load-binance-json (str "data/market/" sym "_1m.json")))
         sr   (strat-rets c)
         s0   (sharpe-of sr)
-        sims (block-bootstrap sr 2000)
+        sims (block-bootstrap sr 1000)
         pos  (count (filter pos? sims))
         lo   (nth (sort sims) (int (* 0.05 (count sims))))
         hi   (nth (sort sims) (int (* 0.95 (count sims))))]
@@ -78,7 +78,7 @@
                             {:closes c :k (:k cfg) :w (:w cfg) :threshold (:thr cfg)
                              :side :long-dip :target-vol 0.30
                              :max-lev 2.0 :ppy ppy}))
-                     ppy cost 8 720 false)]]
+                     ppy cost 6 720 false)]]
   (println (format "  %-15s %d/%d pliegues GANAN" lbl w n)))
 
 (println "\nfin robustez")

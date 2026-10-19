@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mr-dip · live comparison</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="/lib.charts.js"></script>
+<style>
+  :root{
+    --ink:#0b0e14;--panel:#10141d;--line:#222939;--line2:#2c3448;
+    --text:#cdd6e6;--mut:#6d7a92;--mut2:#49536a;
+    --amber:#e5a63c;--steel:#7fa6c9;--up:#3fae7c;--down:#c75146;
+    --mono:"Spline Sans Mono",monospace;--sans:"Instrument Sans",sans-serif;
+  }
+  *{box-sizing:border-box;margin:0}
+  html,body{height:100%}
+  body{background:var(--ink);color:var(--text);font:14px/1.45 var(--sans);
+       display:grid;grid-template-rows:auto 1fr auto;overflow:hidden}
+  button{font-family:var(--sans);cursor:pointer}
+  button:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
+
+  header{display:flex;align-items:center;gap:16px;padding:10px 20px;border-bottom:1px solid var(--line)}
+  .brand{font-size:15px;font-weight:600;white-space:nowrap}
+  .brand i{color:var(--amber);font-style:normal;margin:0 2px}
+  .sub{font:11px var(--mono);color:var(--mut)}
+  .spacer{flex:1}
+  #clock{font:12px var(--mono);color:var(--mut)}
+  #conn{font:11px var(--mono);display:flex;align-items:center;gap:6px;color:var(--mut)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--down)}
+  #conn.on .dot{background:var(--up)}
+
+  main{display:grid;grid-template-columns:repeat(var(--n,2),1fr);min-height:0}
+  .panel{display:grid;grid-template-rows:auto auto 1fr;min-width:0;min-height:0;
+         border-right:1px solid var(--line);background:var(--ink)}
+  .panel:last-child{border-right:0}
+  .phead{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line)}
+  .phead .name{font-weight:600;font-size:13.5px}
+  .phead .inst{font:11px var(--mono);color:var(--mut)}
+  .phead .state{font:11px var(--mono);padding:2px 8px;border-radius:3px;border:1px solid var(--line2);color:var(--mut)}
+  .phead .state.long{color:var(--up);border-color:var(--up)}
+  .flat{margin-left:auto;background:color-mix(in srgb,var(--down) 14%,var(--ink));
+        color:var(--down);border:1px solid var(--down);font-size:11.5px;font-weight:600;
+        padding:4px 12px;border-radius:3px}
+  .flat:hover{background:color-mix(in srgb,var(--down) 28%,var(--ink))}
+  .pmetrics{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:8px 16px;
+            border-bottom:1px solid var(--line);background:var(--panel)}
+  .m .v{font:15px var(--mono);font-variant-numeric:tabular-nums}
+  .m .l{font-size:10px;color:var(--mut)}
+  .pos .v{color:var(--up)} .neg .v{color:var(--down)}
+  .pchart{position:relative;min-height:0}
+  .pchart .c{position:absolute;inset:0}
+  .pchart .warm{position:absolute;bottom:8px;left:12px;font:10.5px var(--mono);color:var(--mut2);pointer-events:none}
+
+  footer{display:flex;gap:20px;padding:7px 20px;border-top:1px solid var(--line);
+         font:11.5px var(--mono);color:var(--mut);flex-wrap:wrap}
+  footer b{color:var(--text);font-weight:500}
+  #feedwrap{display:none}
+  #toast{position:fixed;bottom:44px;left:50%;transform:translateX(-50%) translateY(20px);
+         background:var(--panel);border:1px solid var(--line2);color:var(--text);
+         font:12.5px var(--sans);padding:9px 16px;border-radius:4px;opacity:0;
+         transition:opacity .18s,transform .18s;pointer-events:none;z-index:9}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">mr-dip<i>/</i>live</div>
+  <div class="sub">señal mr-dip · velas 1s desde ticks · z&lt;−3 entra · z≥0 sale · vol 30%</div>
+  <div class="spacer"></div>
+  <div id="clock">--:--:--</div>
+  <div id="conn"><span class="dot"></span>conectando</div>
+</header>
+<main id="panels"></main>
+<section style="border-top:1px solid var(--line);background:var(--panel);display:grid;
+      grid-template-columns:1fr 1fr;gap:0;max-height:170px;overflow:hidden">
+  <div style="border-right:1px solid var(--line);overflow-y:auto;padding:10px 16px">
+    <h2 style="font-size:10px;color:var(--mut2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px">Órdenes abiertas (venue)</h2>
+    <table style="width:100%;border-collapse:collapse;font:11px var(--mono);color:var(--text)">
+      <thead><tr><th style="text-align:left;color:var(--mut2);font-weight:400">venue</th><th style="text-align:left;color:var(--mut2);font-weight:400">símbolo</th><th style="text-align:left;color:var(--mut2);font-weight:400">lado</th><th style="text-align:left;color:var(--mut2);font-weight:400">qty</th></tr></thead>
+      <tbody id="oo"><tr><td colspan="4" style="color:var(--mut2)">—</td></tr></tbody>
+    </table>
+  </div>
+  <div style="overflow-y:auto;padding:10px 16px">
+    <h2 style="font-size:10px;color:var(--mut2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px">Trades históricos (venue)</h2>
+    <table style="width:100%;border-collapse:collapse;font:11px var(--mono);color:var(--text)">
+      <thead><tr><th style="text-align:left;color:var(--mut2);font-weight:400">hora</th><th style="text-align:left;color:var(--mut2);font-weight:400">venue</th><th style="text-align:left;color:var(--mut2);font-weight:400">lado</th><th style="text-align:left;color:var(--mut2);font-weight:400">qty</th></tr></thead>
+      <tbody id="th"></tbody>
+    </table>
+  </div>
+</section>
+<footer>
+  <div>venues <b id="f-venues">—</b></div>
+  <div>órdenes reales <b>papel/testnet</b></div>
+  <div>paridad <b>señal = backtest (kaocha)</b></div>
+  <div style="margin-left:auto"><b id="f-ev">0</b> eventos · <b id="f-err">0</b> errores</div>
+</footer>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const toast = m => { const t=$('toast'); t.textContent=m; t.classList.add('show');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2600); };
+setInterval(()=>$('clock').textContent=new Date().toISOString().slice(11,19)+' UTC',1000);
+
+const VENUES = {};   // id -> {label, chart, candles, eq, dom, dirty, meta}
+let errors = 0, events = 0;
+
+function makePanel(v) {
+  const p = document.createElement('div'); p.className = 'panel';
+  p.innerHTML = `
+    <div class="phead">
+      <span class="name">${v.label}</span>
+      <span class="inst">${v.instrument || '…'}</span>
+      <span class="state">flat</span>
+      <button class="flat">flatten</button>
+    </div>
+    <div class="pmetrics">
+      <div class="m"><div class="v" data-k="pos">0.0000</div><div class="l">posición</div></div>
+      <div class="m"><div class="v" data-k="pnl">0.00</div><div class="l">P&L $ (mtm)</div></div>
+      <div class="m"><div class="v" data-k="sh">—</div><div class="l">sharpe 1s</div></div>
+      <div class="m"><div class="v" data-k="hit">—</div><div class="l">hit-rate</div></div>
+      <div class="m"><div class="v" data-k="dd">0.00%</div><div class="l">maxDD</div></div>
+      <div class="m"><div class="v" data-k="px">—</div><div class="l">últ. precio</div></div>
+    </div>
+    <div class="pchart"><div class="c"></div><div class="warm">precargando historia…</div></div>`;
+  $('panels').appendChild(p);
+  const chart = LightweightCharts.createChart(p.querySelector('.c'), {
+    layout:{background:{color:'#0b0e14'},textColor:'#6d7a92',fontFamily:'Spline Sans Mono',fontSize:10},
+    grid:{vertLines:{color:'#141926'},horzLines:{color:'#141926'}},
+    timeScale:{timeVisible:true,secondsVisible:true,borderColor:'#222939'},
+    rightPriceScale:{borderColor:'#222939'}, crosshair:{mode:0},
+  });
+  const candles = chart.addCandlestickSeries({upColor:'#3fae7c',downColor:'#c75146',
+    borderVisible:false,wickUpColor:'#3fae7c',wickDownColor:'#c75146'});
+  const eq = chart.addLineSeries({color:'#e5a63c',lineWidth:1,priceScaleId:'eq',lastValueVisible:false});
+  chart.priceScale('eq').applyOptions({scaleMargins:{top:.85,bottom:0}});
+  const fit = () => chart.applyOptions({width:p.querySelector('.c').clientWidth,
+                                        height:p.querySelector('.c').clientHeight});
+  new ResizeObserver(fit).observe(p.querySelector('.c')); fit();
+  p.querySelector('.flat').onclick = async () => {
+    const r = await fetch('/flatten/'+v.id, {method:'POST'});
+    toast((await r.json()).msg);
+  };
+  const cells = {};
+  p.querySelectorAll('[data-k]').forEach(el => cells[el.dataset.k] = el);
+  return { chart, candles, eq, cells,
+    els:{ state:p.querySelector('.state'), inst:p.querySelector('.inst'),
+          warm:p.querySelector('.warm') },
+    candles_data:[], eq_data:[], dirty:false, metaDirty:false,
+    setPos:{price:null,line:null} };
+}
+
+fetch('/api/venues').then(r=>r.json()).then(vs => {
+  document.documentElement.style.setProperty('--n', vs.length);
+  for (const v of vs) {
+    VENUES[v.id] = Object.assign(makePanel(v), v, {position:v.position||0});
+    $('f-venues').textContent = ( $('f-venues').textContent ? $('f-venues').textContent+' · ' : '' ) + v.label;
+  }
+  connect();
+});
+
+/* ---- sensible realtime: single rAF repaint, dirty flags ---- */
+function paint() {
+  for (const id in VENUES) {
+    const V = VENUES[id];
+    if (V.dirty) {
+      V.candles.setData(V.candles_data);
+      V.eq.setData(V.eq_data);
+      V.dirty = false;
+    }
+    if (V.metaDirty && V.cells) {
+      const m = V.candles_data[V.candles_data.length-1];
+      if (V.cells.px) V.cells.px.textContent = m ? m.close.toFixed(2) : '—';
+      V.metaDirty = false;
+    }
+  }
+  $('f-ev').textContent = events; $('f-err').textContent = errors;
+  requestAnimationFrame(paint);
+}
+requestAnimationFrame(paint);
+
+let lastBar = {}; // venue -> {time, bar}
+function applyBar(ev) {
+  const V = VENUES[ev.venue]; if (!V) return;
+  const t = Math.floor(ev.ts/1000);
+  const bar = {time:t, open:ev.close, high:ev.close, low:ev.close, close:ev.close};
+  const arr = V.candles_data, last = arr[arr.length-1];
+  if (last && last.time === t) arr[arr.length-1] = bar; else arr.push(bar);
+  if (V.candles_data.length > 3600) V.candles_data.splice(0, 600);
+  V.eq_data.push({time:t, value:ev.target});
+  if (V.eq_data.length > 3600) V.eq_data.splice(0, 600);
+  if (V.cells.pos) {
+    V.cells.pos.textContent = (+ev.position).toFixed(4);
+    V.cells.pos.parentElement.className = 'm ' + (ev.position > 0 ? 'pos' : '');
+  }
+  if (V.cells.tg) V.cells.tg.textContent = (+ev.target).toFixed(4);
+  if (ev.z !== undefined && V.cells.z) V.cells.z.textContent = ev.z.toFixed(2);
+  if (ev.state !== undefined) {
+    V.els.state.textContent = ev.state ? 'LONG' : 'flat';
+    V.els.state.classList.toggle('long', !!ev.state);
+  }
+  // live update (setData only on connect/history)
+  V.candles.update(bar);
+  V.eq.update({time:t, value:ev.target});
+  V.metaDirty = true;
+}
+
+function connect() {
+  async function pollBookkeeping() {
+  try {
+    const vs = await (await fetch('/api/venues')).json();
+    let oo = '';
+    for (const v of vs) {
+      const rows = await (await fetch('/api/open-orders/' + v.id)).json();
+      for (const r of (Array.isArray(rows) ? rows : []))
+        oo += `<tr><td class="v">${v.id}</td><td>${r.symbol || r.instrument || '—'}</td>` +
+              `<td class="${String(r.side||'').toLowerCase()}">${r.side || '—'}</td><td>${r.qty}</td></tr>`;
+    }
+    document.querySelector('#oo').innerHTML = oo || '<tr><td colspan="4" style="color:var(--mut2)">sin órdenes abiertas</td></tr>';
+    let th = '';
+    for (const v of vs) {
+      const rows = await (await fetch('/api/trades/' + v.id)).json();
+      for (const r of rows.slice(0, 12))
+        th += `<tr><td>${new Date(r.ts).toTimeString().slice(0,8)}</td><td class="v">${v.id}</td>` +
+              `<td class="${r.side}">${r.side}</td><td>${(+r.qty).toFixed(4)}</td></tr>`;
+    }
+    document.querySelector('#th').innerHTML = th || '<tr><td colspan="4" style="color:var(--mut2)">sin trades aún</td></tr>';
+  } catch {}
+}
+setInterval(pollBookkeeping, 5000);
+pollBookkeeping();
+const ws = new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws`);
+  ws.onopen = () => { $('conn').className='on'; $('conn').innerHTML='<span class="dot"></span>en vivo'; };
+  ws.onclose = () => { $('conn').className=''; $('conn').innerHTML='<span class="dot"></span>reconectando…';
+                       setTimeout(connect,1500); };
+  ws.onmessage = e => {
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    events++;
+    if (ev.type === 'error') errors++;
+    const V = VENUES[ev.venue]; if (!V) return;
+    if (ev.type === 'history') {
+      const t = Math.floor(ev.ts/1000);
+      V.candles_data.push({time:t, open:ev.close, high:ev.close, low:ev.close, close:ev.close});
+      V.eq_data.push({time:t, value:ev.target});
+      V.els.warm.textContent = 'historia precargada: ' + V.candles_data.length + ' velas';
+      V.dirty = true; V.metaDirty = true;
+      clearTimeout(V._h); V._h = setTimeout(() => V.els.warm.textContent = '', 4000);
+    }
+    else if (ev.type === 'bar') applyBar(ev);
+    else if (ev.type === 'order') {
+      toast(`${ev.venue}: ${ev.side} ${(+ev.qty).toFixed(4)} @ ${(ev.price||0).toFixed(2)}`);
+      if (ev.side === 'buy') {
+        if (V.setPos.line) V.candles.removePriceLine(V.setPos.line);
+        V.setPos.line = V.candles.createPriceLine({price:ev.price,color:'#7fa6c9',
+          lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'entrada'});
+      } else if (V.setPos.line) { V.candles.removePriceLine(V.setPos.line); V.setPos.line = null; }
+    }
+    else if (ev.type === 'notice') { toast(`${ev.venue}: ${ev.msg}`); V.els.warm.textContent = ev.msg; }
+    else if (ev.type === 'kill') { toast(`KILL SWITCH ${ev.venue}`); V.els.state.textContent = 'kill'; }
+    else if (ev.type === 'metrics') {
+      const c = V.cells; if (!c.pnl) return;
+      c.pnl.textContent = (ev.pnl >= 0 ? '+' : '') + ev.pnl.toFixed(2);
+      c.pnl.parentElement.className = 'm ' + (ev.pnl >= 0 ? 'pos' : 'neg');
+      c.sh.textContent = ev.sharpe.toFixed(2);
+      c.hit.textContent = ev.trips ? Math.round(100 * ev.wins / ev.trips) + '%' : '—';
+      c.dd.textContent = (ev.maxdd * 100).toFixed(2) + '%';
+    }
+  };
+}
+</script>
+</body>
+</html>
