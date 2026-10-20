@@ -21,7 +21,9 @@ b = json.load(open("/tmp/okx_page_$$.json"))["data"]
 r = json.load(open("$ROWS"))
 json.dump(b + r, open("$ROWS", "w"))
 PYEOF
-  AFTER=$(python3 -c "import json; print(json.load(open('/tmp/okx_page_$$.json'))['data'][0][0])")
+  # cursor = registro MÁS VIEJO de la página (OKX devuelve newest→oldest;
+  # usar el más nuevo re-descarga la misma ventana, corpus duplicado 99%)
+  AFTER=$(python3 -c "import json; print(json.load(open('/tmp/okx_page_$$.json'))['data'][-1][0])")
   N=$((N + COUNT))
   sleep 0.15
 done

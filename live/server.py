@@ -30,19 +30,19 @@ VENUES = [
     {"id": "binance-v", "executor": "binance:btcusdt", "instrument": "BTCUSDT", "label": "BIN · BTC perp L/S", "fee_bps": 5.0, "funding": True},
     {"id": "binance-eth-v", "executor": "binance:ethusdt", "instrument": "ETHUSDT", "label": "BIN · ETH perp L/S", "fee_bps": 5.0, "funding": True},
     {"id": "binance-sol-v", "executor": "binance:solusdt", "instrument": "SOLUSDT", "label": "BIN · SOL perp L/S", "fee_bps": 5.0, "funding": True},
-    {"id": "okx-v",    "executor": "okx:btc-usdt-swap", "instrument": "BTC-USDT-SWAP", "label": "OKX · BTC perp L/S"},
+    {"id": "okx-v",    "executor": "okx:btc-usdt-swap", "instrument": "BTC-USDT-SWAP", "fee_bps": 5.0, "funding": True, "label": "OKX · BTC perp L/S"},
     {"id": "okx-eth-v","executor": "okx:eth-usdt-swap", "instrument": "ETH-USDT-SWAP", "label": "OKX · ETH perp L/S", "fee_bps": 5.0, "funding": True},
     {"id": "okx-sol-v","executor": "okx:sol-usdt-swap", "instrument": "SOL-USDT-SWAP", "label": "OKX · SOL perp L/S", "fee_bps": 5.0, "funding": True},
-    {"id": "bybit-v",  "executor": "bybit:btcusdt",  "instrument": "BTCUSDT", "label": "BYB · BTC perp L/S"},
+    {"id": "bybit-v",  "executor": "bybit:btcusdt",  "instrument": "BTCUSDT", "fee_bps": 5.5, "funding": True, "label": "BYB · BTC perp L/S"},
     {"id": "bybit-eth-v","executor": "bybit:ethusdt","instrument": "ETHUSDT", "label": "BYB · ETH perp L/S", "fee_bps": 5.5, "funding": True},
     {"id": "bybit-sol-v","executor": "bybit:solusdt","instrument": "SOLUSDT", "label": "BYB · SOL perp L/S", "fee_bps": 5.5, "funding": True},
     {"id": "bybit-xrp-v","executor": "bybit:xrpusdt","instrument": "XRPUSDT", "label": "BYB · XRP perp L/S", "fee_bps": 5.5, "funding": True},
     {"id": "bybit-doge-v","executor": "bybit:dogeusdt","instrument": "DOGEUSDT", "label": "BYB · DOGE perp L/S", "fee_bps": 5.5, "funding": True},
-    {"id": "cbse-v",    "executor": "coinbase:btc-usd", "instrument": "BTC-USD", "long_only": True, "label": "CBS · BTC spot L"},
+    {"id": "cbse-v",    "executor": "coinbase:btc-usd", "instrument": "BTC-USD", "long_only": True, "fee_bps": 8.0, "label": "CBS · BTC spot L"},
     {"id": "cbse-eth-v","executor": "coinbase:eth-usd", "instrument": "ETH-USD", "long_only": True, "label": "CBS · ETH spot L", "fee_bps": 8.0, "funding": False},
     {"id": "cbse-sol-v","executor": "coinbase:sol-usd", "instrument": "SOL-USD", "long_only": True, "label": "CBS · SOL spot L", "fee_bps": 8.0, "funding": False},
     {"id": "cbse-xrp-v","executor": "coinbase:xrp-usd", "instrument": "XRP-USD", "long_only": True, "label": "CBS · XRP spot L", "fee_bps": 8.0, "funding": False},
-    {"id": "krkn-v",    "executor": "kraken:btc-usd", "instrument": "BTC-USD", "long_only": True, "label": "KRK · BTC spot L"},
+    {"id": "krkn-v",    "executor": "kraken:btc-usd", "instrument": "BTC-USD", "long_only": True, "fee_bps": 26.0, "label": "KRK · BTC spot L"},
     {"id": "krkn-eth-v","executor": "kraken:eth-usd", "instrument": "ETH-USD", "long_only": True, "label": "KRK · ETH spot L", "fee_bps": 26.0, "funding": False},
     {"id": "krkn-sol-v","executor": "kraken:sol-usd", "instrument": "SOL-USD", "long_only": True, "label": "KRK · SOL spot L", "fee_bps": 26.0, "funding": False},
     {"id": "krkn-xrp-v","executor": "kraken:xrp-usd", "instrument": "XRP-USD", "long_only": True, "label": "KRK · XRP spot L", "fee_bps": 26.0, "funding": False},
@@ -390,7 +390,7 @@ def main():
                             pass
                     buf = ""
         threading.Thread(target=tail, daemon=True).start()
-    web.run_app(app, port=7777, print=None)
+    web.run_app(app, host="127.0.0.1", port=7777, print=None)
 
 async def health(request):
     """¿Todo corre? Edad de cada pieza en un vistazo."""

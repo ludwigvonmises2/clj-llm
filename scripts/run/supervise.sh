@@ -16,7 +16,9 @@ flock -n 9 || { echo "$NAME: ya activo"; exit 0; }
 
 cd "$DIR" || exit 1
 while true; do
-  "$@" >> "$LOGDIR/$NAME.log" 2>&1
+  LOG="$LOGDIR/$NAME.log"
+  [ -f "$LOG" ] && [ "$(stat -c%s "$LOG")" -gt 52428800 ] && mv -- "$LOG" "$LOG.1"
+  "$@" >> "$LOG" 2>&1
   rc=$?; echo "[$(date -Is)] $NAME exited ($rc) — restart in 3s" >> "$LOGDIR/$NAME.supervisor.log"
   sleep 3
 done

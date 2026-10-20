@@ -241,7 +241,9 @@
                             spread-bps (if (and bid ask (pos? bid))
                                          (* 10000.0 (/ (- ask bid) bid))
                                          9999.0)]
-                        (emit {:type "bar" :venue id :ts (* (now-ms) 1000)
+                        ;; MILISEGUNDOS (C1): µs rompía los ejes de los
+                        ;; gráficos y podía congelar el desk completo
+                        (emit {:type "bar" :venue id :ts (now-ms)
                                :close px :target newpos :position pos
                                :z z-now
                                :spread (when (< spread-bps 9000.0)
