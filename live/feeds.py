@@ -153,6 +153,12 @@ async def aster_feed(_, on_event, stop):
     streams = "/".join(f"{s}@trade" for s in ASTER_SYMBOLS)
     async with aiohttp.ClientSession() as s:
         async with s.ws_connect(f"{ASTER_WS}/{streams}", heartbeat=20) as ws:
+            # path combinado no emite en su server: SUBSCRIBE por mensaje
+            # (API binance-compatible) sobre una sola conexión
+            await ws.send_str(json.dumps({
+                "method": "SUBSCRIBE",
+                "params": [f"{sym}@trade" for sym in ASTER_SYMBOLS],
+                "id": 1}))
             on_event({"type": "notice", "venue": "aster",
                       "msg": f"perps DEX: {len(ASTER_SYMBOLS)} símbolos (1 conexión)"})
             async for msg in ws:

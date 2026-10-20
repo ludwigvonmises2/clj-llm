@@ -337,6 +337,9 @@ def main():
                              args=(v["id"], v["feed"])).start()
     threading.Thread(target=feed_thread, daemon=True,
                      args=("binance-all", "BTCUSDT")).start()
+    for extra in ("hl", "aster"):
+        threading.Thread(target=feed_thread, daemon=True,
+                         args=(extra, "BTC")).start()
     if clojure_ids:
         def tail():
             p = os.path.join(HERE, "clj_events.jsonl")
