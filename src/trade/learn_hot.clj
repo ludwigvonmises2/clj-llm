@@ -39,11 +39,11 @@
    {:name "scalping"    :k 20 :w 120 :threshold 1.5 :ppy ppy-1m :tv 0.30}])
 
 (defn sigfn-for
-  [{:keys [k w threshold tv]}]
+  [{:keys [k w threshold tv ppy] :or {tv 0.30 ppy ppy-1m}}]
   (fn [closes]
     (signals/mr-zscore {:closes closes :k k :w w :threshold threshold
                         :side :long-dip :target-vol tv
-                        :max-lev 2.0 :ppy ppy-1m})))
+                        :max-lev 2.0 :ppy ppy})))
 
 (defn read-binary-tape
   "Cintas binarias del recorder: 12 bytes por print (sec u32 + px f64)."
@@ -171,13 +171,21 @@
     (println (format "CAMPEÓN SCALP: k=%d w=%d z=%.1f | score %.2f | vecinos %.2f"
                      (:k campeon) (:w campeon) (:threshold campeon)
                      (:score campeon) (:vecinos campeon)))
-    (spit "live/champion.edn"
-          (str "{:scalp {:k " (:k campeon) " :w " (:w campeon)
-               " :threshold " (:threshold campeon)
-               " :name \"scalping-grid\" :score " (:score campeon)
-               " :vecinos " (:vecinos campeon) "}\n"
-               ;; swing 1m: se rellena con la pasada --1m
-               " :swing {:k 60 :w 360 :threshold 3.0 :name \"default\"}}\n"))
+    ;; escritura ATÓMICA preservando :swing aprendido (fallo M8: el
+    ;; placeholder pisaba el swing del ciclo --1m)
+    (let [prev (try (edn/read-string (slurp "live/champion.edn"))
+                    (catch Exception _ {}))
+          tmp "live/champion.edn.tmp"]
+      (spit tmp (str (assoc (or prev {})
+                            :scalp {:k (:k campeon) :w (:w campeon)
+                                    :threshold (:threshold campeon)
+                                    :name "scalping-grid" :score (:score campeon)
+                                    :vecinos (:vecinos campeon)}) "\n"))
+      (java.nio.file.Files/move
+       (java.nio.file.Paths/get (str tmp) (into-array String []))
+       (java.nio.file.Paths/get "live/champion.edn" (into-array String []))
+       (into-array java.nio.file.StandardCopyOption
+                   [java.nio.file.StandardCopyOption/REPLACE_EXISTING])))
     campeon))
 
 (defn ^:private grid-1m
@@ -201,13 +209,20 @@
                      (:k campeon) (:w campeon) (:threshold campeon)
                      (:wins campeon) (:folds campeon)))
     (let [prev (try (edn/read-string (slurp "live/champion.edn"))
-                    (catch Exception _ {}))]
-      (spit "live/champion.edn"
-            (str (assoc-in (or prev {}) [:swing]
-                           {:k (:k campeon) :w (:w campeon)
-                            :threshold (:threshold campeon)
-                            :name "swing-grid" :wins (:wins campeon)
-                            :folds (:folds campeon)}) "\n")))
+                    (catch Exception _ {}))
+          tmp "live/champion.edn.tmp"]
+      ;; escritura ATÓMICA: un cerebro leyendo a mitad de spit lee EDN
+      ;; roto y cae a defaults 30 s (fallo F9 del review)
+      (spit tmp (str (assoc-in (or prev {}) [:swing]
+                               {:k (:k campeon) :w (:w campeon)
+                                :threshold (:threshold campeon)
+                                :name "swing-grid" :wins (:wins campeon)
+                                :folds (:folds campeon)}) "\n"))
+      (java.nio.file.Files/move
+       (java.nio.file.Paths/get (str tmp) (into-array String []))
+       (java.nio.file.Paths/get "live/champion.edn" (into-array String []))
+       (into-array java.nio.file.StandardCopyOption
+                   [java.nio.file.StandardCopyOption/REPLACE_EXISTING])))
     campeon))
 
 (defn -main [& args]

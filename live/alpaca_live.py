@@ -29,13 +29,16 @@ hist = CryptoHistoricalDataClient(KEYS["ALPACA_API_KEY_ID"],
                                   KEYS["ALPACA_API_SECRET_KEY"])
 
 def venue_position(symbol):
+    """Posición real de Alpaca o None si la API falla — jamás 0.0
+    inventado (el venue es la fuente de verdad; 0 falso = phantom flat)."""
     try:
         for p in api.get_all_positions():
             if p.symbol == symbol.replace("/", ""):
                 return float(p.qty)
-    except Exception:
-        pass
-    return 0.0
+        return 0.0
+    except Exception as e:
+        print(f"alpaca position error: {e}", flush=True)
+        return None
 
 def run(on_event=None, dry=False):
     """Data pump: closed 1m bars of Alpaca's own feed → relay."""
@@ -44,7 +47,9 @@ def run(on_event=None, dry=False):
     emit = lambda ev: on_event(dict(ev, venue="alpaca"))
     asset = STATE["instrument"]
     STATE["api"] = api
-    STATE["pos"] = venue_position(asset)
+    pos = venue_position(asset)
+    if pos is not None:
+        STATE["pos"] = pos
     emit({"type": "start", "instrument": asset, "dry": dry,
           "position": STATE["pos"],
           "data": "velas 1m propias de Alpaca; decisión en el cerebro"})

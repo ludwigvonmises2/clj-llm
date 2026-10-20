@@ -14,10 +14,11 @@ FEE = 0.0005          # taker 5 bps
 LATENCY_S = (0.020, 0.060)
 TOP_DEPTH = 40.0      # BTC synthetic top-of-book depth
 HALF_SPREAD_BPS = 1.2 # synthetic half-spread at rest
+PX_STALE_S = 10       # un print más viejo que esto = mercado muerto
 
 def make_state(instrument):
     return {"pos": 0.0, "entry": 0.0, "realized": 0.0,
-            "instrument": instrument, "last_px": None}
+            "instrument": instrument, "last_px": None, "last_px_ts": 0.0}
 
 def synthetic_book(rv, last):
     """L2 sintético: el spread se ensancha con la volatilidad 1s."""
@@ -28,8 +29,9 @@ def execute(state, side, qty, why="signal"):
     """Fill de mercado de una orden YA DECIDIDA por el cerebro.
     Muta state; devuelve el fill (px medio, fee, slippage, tramos)."""
     last = state["last_px"]
-    if not last:
-        return {"ok": False, "msg": "sin precio de mercado aún"}
+    # precio obsoleto = mercado muerto: NO llenar (fallo F6 del review)
+    if not last or time.time() - state.get("last_px_ts", 0) > PX_STALE_S:
+        return {"ok": False, "msg": "sin precio de mercado vivo"}
     time.sleep(random.uniform(*LATENCY_S) / 10)   # 2-6 ms efectivos
     # vol 1s de los últimos prints: spread sensible al régimen
     rv = state.get("rv")
@@ -51,7 +53,7 @@ def execute(state, side, qty, why="signal"):
     avg_px = cost / filled if filled else last
     qty_eff = filled                      # jamás mover posición sin fill
     fee = avg_px * qty_eff * FEE
-    # CONTABILIDAD long/short (regla única, simétrica):
+    # CONTABILIDAD long/short (una regla, simétrica):
     #   mismo sentido y crece  -> entry ponderado, sin realized
     #   mismo sentido y reduce -> realized (avg_px - entry) * cerrado * signo
     #   cierre total / flip    -> realized de la pierna vieja; entry fresco
@@ -89,21 +91,26 @@ def start_drainer(tag, state):
         closes = []
         cur = None
         while True:
-            ev = q.get()
-            if ev.get("type") != "print":
-                continue
-            px = float(ev["px"])
-            state["last_px"] = px
-            sec = int(ev["sec"])
-            if cur is None or sec == cur[0]:
-                closes.append(px)
-                cur = (sec, px)
-            else:
-                if len(closes) > 2:
-                    rets = [math.log(closes[i] / closes[i - 1])
-                            for i in range(1, len(closes))]
-                    m = sum(rets) / len(rets)
-                    state["rv"] = math.sqrt(
-                        sum((r - m) ** 2 for r in rets) / (len(rets) - 1))
-                closes, cur = [px], (sec, px)
+            try:
+                ev = q.get()
+                if ev.get("type") != "print":
+                    continue
+                px = float(ev["px"])
+                state["last_px"] = px
+                state["last_px_ts"] = time.time()
+                sec = int(ev["sec"])
+                if cur is None or sec == cur[0]:
+                    closes.append(px)
+                    cur = (sec, px)
+                else:
+                    if len(closes) > 2:
+                        rets = [math.log(closes[i] / closes[i - 1])
+                                for i in range(1, len(closes))]
+                        m = sum(rets) / len(rets)
+                        state["rv"] = math.sqrt(
+                            sum((r - m) ** 2 for r in rets) / (len(rets) - 1))
+                    closes, cur = [px], (sec, px)
+            except Exception as e:
+                print(f"drainer error (continúa): {e}", flush=True)
+                time.sleep(0.2)
     threading.Thread(target=work, daemon=True).start()

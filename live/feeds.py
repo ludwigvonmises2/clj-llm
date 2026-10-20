@@ -49,11 +49,6 @@ async def grvt_feed(instrument, on_event, stop):
                 with open("/tmp/feed_heartbeat", "w") as hf:
                     hf.write(str(int(time.time())))
                 if stream == "v1.trade" and trade:
-                    with open("/tmp/feed_events.log", "a") as ef:
-                        ef.write(json.dumps({"type": "print", "venue": "grvt",
-                                             "sec": int(trade["event_time"]) // 1_000_000_000,
-                                             "px": float(trade["price"])}) + "\n")
-                if stream == "v1.trade" and trade:
                     # f-trader GrvtMarketData: sequence_number "0" = snapshot
                     # (los 50 últimos prints al suscribir y en CADA
                     # resuscripción) — descartar siempre o inyectamos
@@ -102,6 +97,7 @@ async def binance_feed(_, on_event, stop):
                 except Exception:
                     pass
 
+_PINGS = set()  # refs fuertes a los pingers (GC de tasks asyncio)
 FEEDS = {"grvt": grvt_feed, "binance-all": binance_feed}
 
 
@@ -125,7 +121,9 @@ async def okx_feed(_, on_event, stop):
                 while not stop.is_set():
                     await ws.send_str("ping")
                     await asyncio.sleep(20)
-            asyncio.get_event_loop().create_task(pinger())
+            ping_task = asyncio.get_event_loop().create_task(pinger())
+            _PINGS.add(ping_task)              # ref fuerte (fallo M4:
+            ping_task.add_done_callback(_PINGS.discard)  # GC de tasks)
             async for msg in ws:
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
@@ -146,6 +144,7 @@ async def okx_feed(_, on_event, stop):
                                       "px": float(r["px"])})
                         elif ch == "books5":
                             on_event({"type": "quote", "venue": f"okx:{inst}",
+                                      "sec": int(r["ts"]) // 1000,
                                       "bid": float(r["bids"][0][0]),
                                       "ask": float(r["asks"][0][0])})
                 except Exception:
@@ -169,7 +168,8 @@ async def bybit_feed(_, on_event, stop):
                 while not stop.is_set():
                     await ws.send_str(json.dumps({"op": "ping"}))
                     await asyncio.sleep(20)
-            asyncio.get_event_loop().create_task(pinger())
+            pt = asyncio.get_event_loop().create_task(pinger())
+            _PINGS.add(pt); pt.add_done_callback(_PINGS.discard)
             async for msg in ws:
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
@@ -188,9 +188,12 @@ async def bybit_feed(_, on_event, stop):
                                       "px": float(r["p"])})
                     elif topic.startswith("orderbook.1."):
                         sym = topic.split(".")[2].lower()
+                        # orderbook.1: data = dict {s,b,a,ts,u} (fallo M4:
+                        # rows[0][0] era KeyError silencioso — cero quotes)
                         on_event({"type": "quote", "venue": f"bybit:{sym}",
-                                  "bid": float(rows[0][0]),
-                                  "ask": float(rows[-1][0])})
+                                  "sec": int(r["ts"]) // 1000,
+                                  "bid": float(r["b"][0][0]),
+                                  "ask": float(r["a"][0][0])})
                 except Exception:
                     pass
 

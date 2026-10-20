@@ -84,8 +84,9 @@ def tape(venue, obj):
     t = obj.get("type")
     if t == "quote":
         path = os.path.join(TAPE_DIR, f"{day}_{venue}.quotes")
+        sec = int(obj.get("sec") or time.time())
         with open(path, "ab") as f:
-            f.write(struct.pack("<Idd", int(obj["sec"]),
+            f.write(struct.pack("<Idd", sec,
                                 float(obj["bid"]), float(obj["ask"])))
     else:
         path = os.path.join(TAPE_DIR, f"{day}_{venue}.prints")

@@ -112,6 +112,9 @@ async def place_order(request):
     if not v: return web.json_response({"ok": False, "msg": "venue desconocido"})
     side = body.get("side"); qty = float(body.get("qty") or 0)
     why = body.get("why", "signal")
+    # FAIL-CLOSED (fallo C2): un side ausente jamás rellena como SELL
+    if side not in ("buy", "sell"):
+        return web.json_response({"ok": False, "msg": "side requerido"})
     # venue virtual: el ejecutor ULTRA hace el fill (largo o corto)
     if v.get("executor"):
         import executors
@@ -222,9 +225,13 @@ async def ws_handler(request):
                 try:
                     m = json.loads(msg.data)
                     if m.get("type") == "flatten":
-                        request.app.loop.create_task(flatten(request.clone(match_info={"venue": m["venue"]})))
-                except Exception:
-                    pass
+                        # aiohttp clone() no acepta match_info (fallo I2):
+                        # llamar a la pasarela HTTP real, que ya funciona
+                        import aiohttp as _a
+                        async with _a.ClientSession() as s:
+                            await s.post(f"http://127.0.0.1:7777/flatten/{m['venue']}")
+                except Exception as e:
+                    print(f"flatten ws: {e}", flush=True)
     finally:
         clients.discard(ws)
     return ws
@@ -245,8 +252,10 @@ async def _capture_loop(app):
     pre_loop_queue.clear()
 
 async def _push(msg):
+    # lista congelada: un cliente conectándose durante el broadcast no
+    # mata la corrutina entera (fallo I6); los muertos se quitan después
     dead = []
-    for ws in clients:
+    for ws in list(clients):
         try: await ws.send_str(msg)
         except Exception: dead.append(ws)
     for ws in dead: clients.discard(ws)
@@ -309,9 +318,18 @@ def main():
                 time.sleep(0.5)
             with open(p) as f:
                 f.seek(0, 2)
+                buf = ""
                 while True:
-                    line = f.readline()
-                    if line.strip():
+                    chunk = f.readline()
+                    if not chunk:
+                        time.sleep(0.3)
+                        continue
+                    buf += chunk
+                    if not buf.endswith("\n"):
+                        continue   # línea a medias: esperar el resto
+                    for line in buf.splitlines():
+                        if not line.strip():
+                            continue
                         try:
                             ev = json.loads(line)
                             if ev.get("venue") == "clojure":
@@ -319,8 +337,7 @@ def main():
                             broadcast(ev)
                         except Exception:
                             pass
-                    else:
-                        time.sleep(0.3)
+                    buf = ""
         threading.Thread(target=tail, daemon=True).start()
     web.run_app(app, port=7777, print=None)
 

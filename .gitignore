@@ -11,3 +11,4 @@ live/.cpcache/
 .cpcache/
 __pycache__/
 *.log
+live/.env.grvt

@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """Order bridge for the dashboard: place a market order on GRVT testnet
-through the OFFICIAL SDK (pysdk). Usage: grvt_sdk_order.py INSTRUMENT BUY|SELL SIZE"""
-import sys, json
+through the OFFICIAL SDK (pysdk). Usage: grvt_sdk_order.py INSTRUMENT BUY|SELL SIZE
+
+Credenciales por ENV (jamás en el repo — fallo M7):
+  GRVT_API_KEY / GRVT_PRIVATE_KEY / GRVT_ACCOUNT_ID"""
+import sys, json, os
 from pysdk.grvt_ccxt import GrvtCcxt
 from pysdk.grvt_ccxt_env import GrvtEnv
 
 def client():
-    return GrvtCcxt(env=GrvtEnv.TESTNET, parameters={
-        "api_key": "3KvMTdOTdezG4RtuPP5tD9Ztifd",
-        "private_key": "0x3e2020dad058146210f3f49a7f70e5a6fa43c44a9ebe4e88d91f65d7e9d91df3",
-        "trading_account_id": "1038018686688896"})
+    try:
+        return GrvtCcxt(env=GrvtEnv.TESTNET, parameters={
+            "api_key": os.environ["GRVT_API_KEY"],
+            "private_key": os.environ["GRVT_PRIVATE_KEY"],
+            "trading_account_id": os.environ["GRVT_ACCOUNT_ID"]})
+    except KeyError as e:
+        raise SystemExit(f"GRVT creds ausentes en env: {e}")
 
 if __name__ == "__main__":
     inst, side, size = sys.argv[1], sys.argv[2].lower(), float(sys.argv[3])
