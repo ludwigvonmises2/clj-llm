@@ -140,3 +140,69 @@
         (is (= {:scalp {:k 1 :w 2 :threshold 3.0}} (edn/read-string (slurp path)))))
       (is (not (.exists (java.io.File. (str path ".tmp")))) "no tmp left behind")
       (finally (.delete f)))))
+
+;; ---------------- reconcile / idempotencia / arranque ----------------
+
+(deftest reconcile-never-overwrites-in-flight-orders
+  (testing "R4: read started >= settle-ms after the last order -> apply"
+    (is (true? (brain/reconcile-apply? 10000 (- 10000 brain/settle-ms 1) 1.0 1.0))))
+  (testing "order sent within settle-ms before the read -> skip"
+    (is (false? (brain/reconcile-apply? 10000 9000 1.0 1.0))))
+  (testing "order sent DURING the read -> skip"
+    (is (false? (brain/reconcile-apply? 10000 10500 1.0 1.0))))
+  (testing "position moved while the read was in flight -> skip"
+    (is (false? (brain/reconcile-apply? 10000 0 1.0 2.0)))))
+
+(deftest unknown-outcome-stops-deciding
+  (is (= :await (:action (plan-on dip :awaiting? true))))
+  (is (= :order (:action (plan-on dip :awaiting? false)))))
+
+(deftest client-order-ids-are-unique
+  (let [ids (repeatedly 1000 #(brain/new-coid "okx-v"))]
+    (is (= 1000 (count (set ids))))))
+
+(deftest spread-gate-is-symmetric
+  (let [up (vec (map-indexed (fn [i x] (if (>= i 225)
+                                         (* x (Math/exp (* 0.0005 (- i 224))))
+                                         x))
+                             (wave 80000.0 240)))
+        on (fn [& {:as o}] (brain/plan (merge base {:cs up :px (peek up) :side :both} o)))
+        short-entry (on :pos-u 0.0)]
+    (is (= "sell" (:side short-entry)))
+    (is (neg? (:target short-entry)))
+    (testing "R14: a SHORT entry adds risk and is gated on a wide book"
+      (is (= :gate (:action (on :pos-u 0.0 :bid 100.0 :ask 100.5)))))
+    (testing "covering that short is an exit: never gated"
+      (let [down (conj up (* 0.99 (peek up)))]
+        (is (= :order (:action (brain/plan (merge base {:cs down :px (peek down) :side :both
+                                                        :pos-u (:newpos-u short-entry)
+                                                        :bid 100.0 :ask 100.5})))))))))
+
+(deftest stale-quotes-are-ignored
+  (let [st {:bid (atom 100.0) :ask (atom 100.5)
+            :quote-ts (atom (- (System/currentTimeMillis) 60000))}]
+    (is (nil? (brain/fresh-quote st :bid)) "60 s old quote = unknown")
+    (reset! (:quote-ts st) (System/currentTimeMillis))
+    (is (= 100.0 (brain/fresh-quote st :bid)))))
+
+(deftest boot-window-comes-from-own-tape
+  (let [dir (.toFile (java.nio.file.Files/createTempDirectory
+                      "tape" (make-array java.nio.file.attribute.FileAttribute 0)))
+        write! (fn [day tag recs]
+                 (let [bb (doto (java.nio.ByteBuffer/allocate (* 12 (count recs)))
+                            (.order java.nio.ByteOrder/LITTLE_ENDIAN))]
+                   (doseq [[sec px] recs] (.putInt bb (int sec)) (.putDouble bb (double px)))
+                   (java.nio.file.Files/write
+                    (.toPath (java.io.File. dir (str day "_" tag ".prints")))
+                    (.array bb)
+                    (make-array java.nio.file.OpenOption 0))))]
+    (try
+      (write! "20261019" "okx:btc-usdt-swap" (for [i (range 500)] [i 1.0]))
+      (write! "20261020" "okx:btc-usdt-swap" (for [i (range 500)] [(+ 1000 i) (+ 100.0 i)]))
+      (write! "20261020" "okx:eth-usdt-swap" (for [i (range 500)] [i 7.0]))
+      (let [cs (brain/tape-closes (.getPath dir) "okx:btc-usdt-swap" 240)]
+        (is (= 240 (count cs)))
+        (is (every? #(>= % 100.0) cs) "newest day, own tag only (rule 4)")
+        (is (apply < cs) "chronological"))
+      (is (= [] (brain/tape-closes (.getPath dir) "aster:solusdt" 240)) "no tape -> warm live")
+      (finally (doseq [^java.io.File f (.listFiles dir)] (.delete f)) (.delete dir)))))

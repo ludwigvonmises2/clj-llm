@@ -94,6 +94,11 @@ def start_engine(venue_id, mod, dry=False):
     threading.Thread(target=worker, daemon=True).start()
 
 MAX_ORDER_USD = 50_000.0
+# idempotency (R6): a client_order_id is executed AT MOST once; a retry of
+# a timed-out request gets the stored answer instead of a second fill
+import collections as _col
+_SEEN_COIDS = _col.OrderedDict()
+_SEEN_MAX = 5000
 
 async def flatten(request):
     venue = request.match_info["venue"]
@@ -153,20 +158,44 @@ async def place_order(request):
     v = next((v for v in VENUES if v["id"] == venue), None)
     if not v: return web.json_response({"ok": False, "msg": "venue desconocido"})
     side = body.get("side"); why = body.get("why", "signal")
+    coid = body.get("client_order_id")
+    if coid and coid in _SEEN_COIDS:
+        prev = _SEEN_COIDS[coid]
+        if prev is None:   # same id still in flight: outcome not known yet
+            return web.json_response({"ok": False, "unknown": True,
+                                      "msg": "orden en curso"})
+        return web.json_response({**prev, "duplicate": True})
+    if coid:
+        _SEEN_COIDS[coid] = None
+    try:
+        resp_ = await _place(v, venue, body, side, why)
+    except Exception as e:
+        resp_ = {"ok": False, "unknown": True, "msg": str(e)[:160]}
+    if coid:
+        if resp_.get("ok"):
+            _SEEN_COIDS[coid] = resp_
+        else:
+            _SEEN_COIDS.pop(coid, None)   # a clean reject may be retried
+        while len(_SEEN_COIDS) > _SEEN_MAX:
+            _SEEN_COIDS.popitem(last=False)
+    return web.json_response(resp_)
+
+async def _place(v, venue, body, side, why):
+    """Fill/sign one order; returns a plain dict (the caller answers)."""
     try:
         qty = float(body.get("qty") or 0)
     except (TypeError, ValueError):
-        return web.json_response({"ok": False, "msg": "qty inválida"})
+        return ({"ok": False, "msg": "qty inválida"})
     import math as _m
     # cap in NOTIONAL (R2: 100 coin units blocked every XRP/DOGE entry and
     # let through $8M of BTC); unit cap only while no price is known
     ref_px = (v.get("state") or {}).get("last_px")
     limit_ok = (qty * ref_px <= MAX_ORDER_USD) if ref_px else qty <= 100
     if not (_m.isfinite(qty) and qty > 0 and limit_ok):
-        return web.json_response({"ok": False, "msg": "qty fuera de límites"})
+        return ({"ok": False, "msg": "qty fuera de límites"})
     # FAIL-CLOSED (fallo C2): un side ausente jamás rellena como SELL
     if side not in ("buy", "sell"):
-        return web.json_response({"ok": False, "msg": "side requerido"})
+        return ({"ok": False, "msg": "side requerido"})
     # venue virtual: el ejecutor ULTRA hace el fill (largo o corto)
     if v.get("executor"):
         import executors
@@ -179,29 +208,31 @@ async def place_order(request):
                         r["avg_px"], f"{venue}-{int(time.time() * 1000)}",
                         z=body.get("z"), target=body.get("target"),
                         spread=body.get("spread"), why=why, fee=r["fee"])
-            return web.json_response({"ok": True,
+            return ({"ok": True,
                                       "avg_px": round(r["avg_px"], 2),
                                       "fee": round(r["fee"], 3),
                                       "slippage_bps": round(r["slippage_bps"], 2),
                                       "pos": round(r["pos"], 6)})
-        return web.json_response({"ok": False, "msg": r.get("msg", "fill falló")})
+        return ({"ok": False, "msg": r.get("msg", "fill falló")})
     inst = body.get("instrument") or v["state"].get("instrument")
     api = (v.get("state") or {}).get("api")
-    if api is None: return web.json_response({"ok": False, "msg": "engine no disponible"})
+    if api is None: return ({"ok": False, "msg": "engine no disponible"})
     try:
         if venue == "grvt":
-            r = api.create_order(inst, "market", side, qty)
+            # SDK calls are blocking HTTP: off the event loop, or every
+            # relay/UI/brain socket stalls behind them (R6)
+            r = await asyncio.to_thread(api.create_order, inst, "market", side, qty)
             # the SDK returns {} on an exchange REJECT instead of raising:
             # that is a failure, never a phantom ok (R3)
             oid = (r or {}).get("order_id") or \
                 ((r or {}).get("metadata") or {}).get("client_order_id")
             if not oid:
-                return web.json_response({"ok": False, "msg": f"grvt rechazó: {str(r)[:120]}"})
+                return ({"ok": False, "msg": f"grvt rechazó: {str(r)[:120]}"})
             resp = {"order_id": str(oid)[:40]}
         else:
             from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
             from alpaca.trading.enums import OrderSide, TimeInForce
-            o = api.submit_order(MarketOrderRequest(
+            o = await asyncio.to_thread(api.submit_order, MarketOrderRequest(
                 symbol=inst.replace("/", ""), qty=qty,
                 side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
                 time_in_force=TimeInForce.GTC))
@@ -210,9 +241,10 @@ async def place_order(request):
                     resp.get("order_id"), z=body.get("z"),
                     target=body.get("target"), spread=body.get("spread"),
                     why=body.get("why", "scalp"))
-        return web.json_response({"ok": True, **resp})
+        return ({"ok": True, **resp})
     except Exception as e:
-        return web.json_response({"ok": False, "msg": str(e)[:160]})
+        # SDK/network exception after sending: the venue MAY have it
+        return ({"ok": False, "unknown": True, "msg": str(e)[:160]})
 
 async def open_orders(request):
     venue = request.match_info["venue"]
@@ -257,12 +289,13 @@ async def venue_position(request):
         return web.json_response({"position": None})
     try:
         if venue == "grvt":
-            rows = v["state"]["api"].fetch_positions()
+            rows = await asyncio.to_thread(v["state"]["api"].fetch_positions)
             pos = next((float(p["size"]) for p in rows
                         if p.get("instrument") == v["state"].get("instrument")), 0.0)
         else:
             inst = v["state"].get("instrument", "")
-            pos = next((float(p.qty) for p in v["state"]["api"].get_all_positions()
+            allp = await asyncio.to_thread(v["state"]["api"].get_all_positions)
+            pos = next((float(p.qty) for p in allp
                         if p.symbol == inst.replace("/", "")), 0.0)
         v["state"]["pos"] = pos
         return web.json_response({"position": pos, "instrument": v["state"].get("instrument")})
@@ -341,7 +374,6 @@ def main():
     app.router.add_get("/lib.charts.js", libcharts)
     app.router.add_get("/api/venues", api_venues)
     app.router.add_get("/api/health", health)
-    app.router.add_get("/api/metrics/{venue}", api_metrics)
     app.router.add_get("/api/roundtrips", api_roundtrips)
     app.router.add_get("/ws", ws_handler)
     app.router.add_post("/flatten/{venue}", flatten)
@@ -468,10 +500,6 @@ async def api_roundtrips(request):
     n = min(int(request.query.get("n", 300)), 1000)
     fees = {v["id"]: v.get("fee_bps") for v in VENUES}
     return web.json_response(store.round_trips(fees, n))
-
-async def api_metrics(request):
-    """Sharpe/hit/maxDD desde las BARRAS PERSISTIDAS — verdad de SQLite."""
-    return web.json_response(store.metrics(request.match_info["venue"]))
 
 if __name__ == "__main__":
     main()
