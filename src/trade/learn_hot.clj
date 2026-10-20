@@ -239,7 +239,7 @@
                 {:venue tag
                  :closes (try (read-prints-tape (.getPath f) max-closes)
                               (catch Exception _ []))})))
-       (filter (fn [s] (>= (count (:closes s)) 500)))
+       (filter (fn [s] (>= (count (:closes s)) 1500)))
        (take n)
        (vec)))
 
@@ -263,10 +263,14 @@
         (doseq [s series] (println "  " (:venue s) (count (:closes s)) "velas"))
         (let [rng (java.util.Random. 42)
               score (fn [closes cfg]
-                      (let [sigfn (sigfn-for cfg)
-                            [w n] (portfolio/fold-verify closes sigfn 31536000
-                                                         cost 3 8000 false)]
-                        (if (pos? n) (double (/ w n)) 0.0)))
+                      ;; una serie corta/malformada no mata el ciclo:
+                      ;; puntúa 0 y sigue (el veredicto no cambia)
+                      (try
+                        (let [sigfn (sigfn-for cfg)
+                              [w n] (portfolio/fold-verify closes sigfn 31536000
+                                                           cost 3 8000 false)]
+                          (if (pos? n) (double (/ w n)) 0.0))
+                        (catch Exception _ 0.0)))
               ranked
               (doall
                (for [cfg tape-configs]
@@ -292,28 +296,37 @@
                             (flush))
                    (assoc cfg :wins wins :of (count series)))))
               campeon (last (sort-by :wins ranked))]
-          (if (and (pos? (:wins campeon))
-                   (>= (:wins campeon) (int (Math/ceil (* 0.6 (:of campeon))))))
-            (do
-              (println (format "CAMPEÓN TAPES: k=%d w=%d z=%.1f -> %d/%d venues"
-                               (:k campeon) (:w campeon) (:threshold campeon)
-                               (:wins campeon) (:of campeon)))
-              (let [prev (try (edn/read-string (slurp "live/champion.edn"))
-                              (catch Exception _ {}))
-                    tmp "live/champion.edn.tmp"]
-                (spit tmp (str (assoc (or prev {})
-                                      :scalp {:k (:k campeon) :w (:w campeon)
-                                              :threshold (:threshold campeon)
-                                              :name "scalp-tapes"
-                                              :wins (:wins campeon)
-                                              :of (:of campeon)}) "\n"))
-                (java.nio.file.Files/move
-                 (java.nio.file.Paths/get (str tmp) (into-array String []))
-                 (java.nio.file.Paths/get "live/champion.edn" (into-array String []))
-                 (into-array java.nio.file.StandardCopyOption
-                             [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))))
-            (println "TAPES: ninguna config gana en ≥60% de venues —"
-                     "no se promueve campeón")))))))
+          (let [promoted? (and (pos? (:wins campeon))
+                               (>= (:wins campeon)
+                                   (int (Math/ceil (* 0.6 (:of campeon))))))]
+            (if promoted?
+              (do (println (format "CAMPEÓN TAPES: k=%d w=%d z=%.1f -> %d/%d venues"
+                                   (:k campeon) (:w campeon) (:threshold campeon)
+                                   (:wins campeon) (:of campeon)))
+                  (let [prev (try (edn/read-string (slurp "live/champion.edn"))
+                                  (catch Exception _ {}))
+                        tmp "live/champion.edn.tmp"]
+                    (spit tmp (str (assoc (or prev {})
+                                          :scalp {:k (:k campeon) :w (:w campeon)
+                                                  :threshold (:threshold campeon)
+                                                  :name "scalp-tapes"
+                                                  :wins (:wins campeon)
+                                                  :of (:of campeon)}) "\n"))
+                    (java.nio.file.Files/move
+                     (java.nio.file.Paths/get (str tmp) (into-array String []))
+                     (java.nio.file.Paths/get "live/champion.edn" (into-array String []))
+                     (into-array java.nio.file.StandardCopyOption
+                                 [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))))
+              (println "TAPES: ninguna config gana en ≥60% de venues —"
+                       "no se promueve campeón"))
+            ;; PRUEBA DE APRENDIZAJE (L137): cada ciclo deja su estado
+            ;; escrito — observable desde /api/health y la UI
+            (spit "live/learning_state.edn"
+                  (pr-str {:at (System/currentTimeMillis)
+                           :what "tapes"
+                           :series (count series)
+                           :venues (mapv :venue (take 6 series))
+                           :promoted promoted?}))))))))
 
 (defn ^:private grid-1m
   "Entrenamiento SWING: familia sobre velas 1m reales (corpus histórico
