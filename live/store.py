@@ -97,6 +97,47 @@ def stats(venue):
     orders = c.execute("SELECT COUNT(*) FROM orders WHERE venue=?", (venue,)).fetchone()[0]
     return {"bars": bars, "orders": orders}
 
+def metrics(venue, window=3600):
+    """VERDAD PERSISTIDA: sharpe/hit/maxDD recomputados desde las barras
+    guardadas (sobreviven refresh de UI y restarts de TODO). La UI jamás
+    vuelve a inventarse números."""
+    import math as _m
+    c = conn()
+    rows = c.execute(
+        "SELECT close, position, target FROM bars WHERE venue=? "
+        "ORDER BY ts DESC LIMIT ?", (venue, window)).fetchall()
+    if len(rows) < 10:
+        return {"sharpe": None, "hit": None, "maxdd": None, "n": len(rows)}
+    closes = [r[0] for r in reversed(rows)]
+    rets = [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes))]
+    n = len(rets)
+    m = sum(rets) / n
+    sd = (_m.sqrt(sum((r - m) ** 2 for r in rets) / (n - 1))
+          if n > 2 else 0.0)
+    sharpe = (m / sd) * _m.sqrt(86400) if sd > 0 else 0.0   # diario (1s)
+    # hit-rate y maxDD sobre las posiciones históricas guardadas
+    trips = wins = 0
+    entry = None
+    eq = peak = 1.0
+    maxdd = 0.0
+    prev_pos = 0.0
+    for r in reversed(rows):
+        pos = r[1]
+        if entry is None and pos:
+            entry = r[0]
+        elif entry is not None and not pos:
+            trips += 1
+            wins += 1 if r[0] > entry else 0
+            entry = None
+        px = r[0]
+        eq *= (1 + (pos / px * (px - prev_pos) if prev_pos and pos else 0))
+        peak = max(peak, eq)
+        maxdd = max(maxdd, 1 - eq / peak)
+        prev_pos = px
+    return {"sharpe": round(sharpe, 2),
+            "hit": round(100 * wins / trips, 1) if trips else None,
+            "maxdd": round(maxdd, 4), "n": len(rows)}
+
 init()
 
 TAPE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tape")

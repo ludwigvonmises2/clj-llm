@@ -170,7 +170,7 @@
       <span id="dname">—</span>
       <span id="dinst"></span>
       <span class="st" id="dst">flat</span>
-      <span id="dpos" class="tf-none" style="font-size:11px;font-variant-numeric:tabular-nums">pos —</span>
+      <span id="dpos" style="font-size:11px;font-variant-numeric:tabular-nums">pos —</span>
       <span id="dpnl" style="font-size:11px;font-variant-numeric:tabular-nums;color:var(--mut)">P&amp;L —</span>
       <span id="dz" style="font-size:11px;color:var(--mut)">z —</span>
       <span id="dmsg"></span>
@@ -276,9 +276,10 @@ function register(v){
     buildTile(V);
   } else {
     if (v.label && V.label !== v.label){ V.label = v.label; if (V.el.name){ V.el.name.textContent = V.label; V.el.name.title = V.label; } }
-    if (v.instrument && V.instrument !== v.instrument){ V.instrument = v.instrument; V.keys = null; }
+    if (v.instrument && V.instrument !== v.instrument){ V.instrument = v.instrument; }
     if (v.position != null){ V.pos = +v.position || 0; }
   }
+  if (V.keys) for (const k of V.keys) if (tileByKey.get(k) === V) tileByKey.delete(k);
   V.keys = matchKeys(V);
   for (const k of V.keys){
     tileByKey.set(k, V);

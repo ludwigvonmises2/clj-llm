@@ -318,6 +318,7 @@ def main():
     app.router.add_get("/lib.charts.js", libcharts)
     app.router.add_get("/api/venues", api_venues)
     app.router.add_get("/api/health", health)
+    app.router.add_get("/api/metrics/{venue}", api_metrics)
     app.router.add_get("/ws", ws_handler)
     app.router.add_post("/flatten/{venue}", flatten)
     app.router.add_post("/order/{venue}", place_order)
@@ -421,11 +422,26 @@ async def api_venues(request):
     out = []
     for v in VENUES:
         st = v.get("state") or {}
+        # VERDAD PERSISTIDA: realized del executor (sobrevive restarts)
+        # + unrealized calculado en BACKEND (pos×(last−entry)); la UI
+        # solo pinta, jamás inventa PnL (fallo L141)
+        realized = st.get("realized")
+        last = st.get("last_px")
+        pos = st.get("pos", 0.0)
+        entry = st.get("entry") or 0.0
+        unreal = (pos * (last - entry)) if (last and entry and pos) else 0.0
         out.append({"id": v["id"], "label": v["label"],
                     "instrument": st.get("instrument"),
-                    "position": st.get("pos", 0.0),
+                    "position": pos,
+                    "realized": round(realized, 2) if realized is not None else None,
+                    "unrealized": round(unreal + (realized or 0), 2),
+                    "fee_bps": v.get("fee_bps"),
                     **store.stats(v["id"])})
     return web.json_response(out)
+
+async def api_metrics(request):
+    """Sharpe/hit/maxDD desde las BARRAS PERSISTIDAS — verdad de SQLite."""
+    return web.json_response(store.metrics(request.match_info["venue"]))
 
 if __name__ == "__main__":
     main()
