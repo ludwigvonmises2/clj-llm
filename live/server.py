@@ -164,7 +164,7 @@ async def place_order(request):
             store.order(venue, int(time.time() * 1000), side, qty,
                         r["avg_px"], f"{venue}-{int(time.time() * 1000)}",
                         z=body.get("z"), target=body.get("target"),
-                        spread=body.get("spread"), why=why)
+                        spread=body.get("spread"), why=why, fee=r["fee"])
             return web.json_response({"ok": True,
                                       "avg_px": round(r["avg_px"], 2),
                                       "fee": round(r["fee"], 3),
@@ -214,11 +214,14 @@ async def open_orders(request):
 
 async def trade_history(request):
     venue = request.match_info["venue"]
+    n = min(int(request.query.get("n", 50)), 300)   # paging: ?n= up to 300
     rows = store.conn().execute(
-        "SELECT ts, side, qty, price, resp FROM orders WHERE venue=? ORDER BY ts DESC LIMIT 50",
-        (venue,)).fetchall()
-    return web.json_response([{"ts": t, "side": s, "qty": q, "price": p, "id": r}
-                              for t, s, q, p, r in rows])
+        "SELECT ts, side, qty, price, fee, resp, why FROM orders WHERE venue=? "
+        "ORDER BY ts DESC LIMIT ?", (venue, n)).fetchall()
+    return web.json_response([{"ts": t, "side": s, "qty": q, "price": p,
+                               "fee": (round(f, 4) if f is not None else None),
+                               "id": r, "why": w}
+                              for t, s, q, p, f, r, w in rows])
 
 async def venue_position(request):
     """THE truth: the venue's own position, via the SDK. Para venues
@@ -256,7 +259,7 @@ async def ws_handler(request):
         for ts, close, target, z, position, state in store.recent_bars(venue):
             await ws.send_str(json.dumps({"type": "history", "venue": venue, "ts": ts,
                 "close": close, "target": target, "z": z, "position": position, "state": state}))
-        for ts, v, side, qty, price in store.recent_orders():
+        for ts, v, side, qty, price, _fee in store.recent_orders():
             if v == venue:
                 await ws.send_str(json.dumps({"type": "order", "venue": venue, "ts": ts,
                     "side": side, "qty": qty, "price": price}))
@@ -319,6 +322,7 @@ def main():
     app.router.add_get("/api/venues", api_venues)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/metrics/{venue}", api_metrics)
+    app.router.add_get("/api/roundtrips", api_roundtrips)
     app.router.add_get("/ws", ws_handler)
     app.router.add_post("/flatten/{venue}", flatten)
     app.router.add_post("/order/{venue}", place_order)
@@ -438,6 +442,12 @@ async def api_venues(request):
                     "fee_bps": v.get("fee_bps"),
                     **store.stats(v["id"])})
     return web.json_response(out)
+
+async def api_roundtrips(request):
+    """Trade history grouped flat -> flat with net P&L (fees inside)."""
+    n = min(int(request.query.get("n", 300)), 1000)
+    fees = {v["id"]: v.get("fee_bps") for v in VENUES}
+    return web.json_response(store.round_trips(fees, n))
 
 async def api_metrics(request):
     """Sharpe/hit/maxDD desde las BARRAS PERSISTIDAS — verdad de SQLite."""

@@ -32,6 +32,11 @@ def init():
     conn().execute("""CREATE TABLE IF NOT EXISTS executor_state (
         venue TEXT PRIMARY KEY, pos REAL, entry REAL, realized REAL,
         ts INTEGER)""")
+    # fee column: per-fill real taker fee (net result per trade, L142/143)
+    try:
+        conn().execute("ALTER TABLE orders ADD COLUMN fee REAL")
+    except Exception:
+        pass  # column already exists
     conn().commit()
     conn().executescript(SCHEMA)
 
@@ -68,11 +73,11 @@ def bar(venue, ts, close, target, z, position, state):
     conn().commit()
 
 def order(venue, ts, side, qty, price, resp="", z=None, target=None,
-          spread=None, why=""):
+          spread=None, why="", fee=None):
     conn().execute(
-        "INSERT INTO orders VALUES (?,?,?,?,?,COALESCE(?, ''),?,?,?,?)",
+        "INSERT INTO orders VALUES (?,?,?,?,?,COALESCE(?, ''),?,?,?,?,?)",
         (int(ts), venue, side, qty, price, str(resp)[:200],
-         z, target, spread, str(why)[:60]))
+         z, target, spread, str(why)[:60], fee))
     conn().commit()
 
 def event(venue, type_, msg):
@@ -88,8 +93,63 @@ def recent_bars(venue, n=600):
 
 def recent_orders(n=40):
     return conn().execute(
-        "SELECT ts, venue, side, qty, price FROM orders ORDER BY ts DESC LIMIT ?",
+        "SELECT ts, venue, side, qty, price, fee FROM orders ORDER BY ts DESC LIMIT ?",
         (n,)).fetchall()
+
+def round_trips(fee_bps, n=300):
+    """Fills grouped into round trips (flat -> flat) per venue, oldest first.
+    Net = gross P&L of the fills - fees; fee falls back to the venue's real
+    taker bps (same rule the executor applies) for fills before the fee
+    column existed. A flip closes the trip and opens a new one with the
+    remainder. The last trip of a venue may still be open."""
+    rows = conn().execute(
+        "SELECT ts, venue, side, qty, price, fee FROM orders "
+        "WHERE qty > 0 AND price > 0 ORDER BY venue, ts").fetchall()
+    trips, cur = [], {}
+    for ts, venue, side, qty, px, fee in rows:
+        bps = fee_bps.get(venue) or 0.0
+        if fee is None:
+            fee = px * qty * bps / 1e4
+        sgn = 1.0 if side == "buy" else -1.0
+        while qty > 1e-12:
+            t = cur.get(venue)
+            if t is None:
+                t = cur[venue] = {"venue": venue, "side": "long" if sgn > 0 else "short",
+                                  "open_ts": ts, "close_ts": None, "pos": 0.0,
+                                  "qty": 0.0, "cash": 0.0, "fee": 0.0, "fills": 0,
+                                  "entry_px": px, "exit_px": None}
+            # take only up to flat: the remainder opens the next trip
+            closing = t["pos"] * sgn < 0
+            take = min(qty, abs(t["pos"])) if closing else qty
+            part = take / qty
+            t["pos"] += sgn * take
+            t["cash"] -= sgn * take * px
+            t["fee"] += fee * part
+            t["fills"] += 1
+            if not closing:
+                t["qty"] += take
+            fee -= fee * part
+            qty -= take
+            if closing:
+                t["exit_px"] = px
+            if abs(t["pos"]) < 1e-9:
+                t["close_ts"] = ts
+                trips.append(t)
+                del cur[venue]
+    trips.extend(cur.values())
+    out = []
+    for t in trips:
+        closed = t["close_ts"] is not None
+        gross = t["cash"] if closed else None
+        out.append({"venue": t["venue"], "side": t["side"],
+                    "open_ts": t["open_ts"], "close_ts": t["close_ts"],
+                    "qty": round(t["qty"], 8), "entry_px": t["entry_px"],
+                    "exit_px": t["exit_px"], "fills": t["fills"],
+                    "fee": round(t["fee"], 4),
+                    "gross": round(gross, 4) if closed else None,
+                    "net": round(gross - t["fee"], 4) if closed else None})
+    out.sort(key=lambda r: r["close_ts"] or r["open_ts"], reverse=True)
+    return out[:n]
 
 def stats(venue):
     c = conn()
