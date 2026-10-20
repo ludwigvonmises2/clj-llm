@@ -29,7 +29,26 @@ def conn():
     return c
 
 def init():
+    conn().execute("""CREATE TABLE IF NOT EXISTS executor_state (
+        venue TEXT PRIMARY KEY, pos REAL, entry REAL, realized REAL,
+        ts INTEGER)""")
+    conn().commit()
     conn().executescript(SCHEMA)
+
+def save_executor_state(venue, state):
+    """Write-through del venue virtual: su posición ES verdad y debe
+    sobrevivir restarts del desk (si no, cada reinicio miente)."""
+    conn().execute(
+        "INSERT OR REPLACE INTO executor_state VALUES (?,?,?,?,?)",
+        (venue, state["pos"], state["entry"], state["realized"],
+         int(time.time() * 1000)))
+    conn().commit()
+
+def load_executor_state(venue):
+    row = conn().execute(
+        "SELECT pos, entry, realized FROM executor_state WHERE venue=?",
+        (venue,)).fetchone()
+    return {"pos": row[0], "entry": row[1], "realized": row[2]} if row else None
 
 def bar(venue, ts, close, target, z, position, state):
     conn().execute(

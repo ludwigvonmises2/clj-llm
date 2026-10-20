@@ -144,6 +144,7 @@ async def place_order(request):
         import executors
         r = executors.execute(v["state"], side, qty, why=why)
         if r.get("ok"):
+            store.save_executor_state(venue, v["state"])   # write-through
             store.order(venue, int(time.time() * 1000), side, qty,
                         r["avg_px"], f"{venue}-{int(time.time() * 1000)}",
                         z=body.get("z"), target=body.get("target"),
@@ -329,6 +330,11 @@ def main():
             st = executors.make_state(v["instrument"],
                                       fee_bps=v.get("fee_bps", 5.0),
                                       funding=v.get("funding", False))
+            persisted = store.load_executor_state(v["id"])
+            if persisted:
+                # el venue virtual SOBREVIVE restarts: su posición es
+                # verdad persistida, no memoria volátil
+                st.update(persisted)
             v["state"] = st
             executors.start_drainer(v["executor"], st)
     for v in VENUES:
