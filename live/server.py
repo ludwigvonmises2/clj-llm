@@ -24,10 +24,34 @@ VENUES = [
     {"id": "grvt",     "label": "GRVT · BTC testnet REAL", "brain": "clojure",
      "feed": "BTC_USDT_Perp"},
     {"id": "alpaca",   "module": "alpaca_live", "label": "Alpaca · BTC paper REAL", "brain": "python"},
-    {"id": "binance-v","executor": "binance:btcusdt", "instrument": "BTCUSDT",
-     "label": "Binance · virtual ULTRA"},
-    {"id": "okx-v",    "executor": "okx:btc-usdt-swap", "instrument": "BTC-USDT-SWAP",
-     "label": "OKX · perp virtual ULTRA (L/S)"},
+    # UN ejecutor virtual por venue×activo: la decisión sigue en el
+    # cerebro Clojure; aquí solo fills ULTRA. Spot = solo-long (el
+    # venue real no permite short); perps = long/short.
+    {"id": "binance-v", "executor": "binance:btcusdt", "instrument": "BTCUSDT", "label": "BIN · BTC perp L/S", "fee_bps": 5.0, "funding": True},
+    {"id": "binance-eth-v", "executor": "binance:ethusdt", "instrument": "ETHUSDT", "label": "BIN · ETH perp L/S", "fee_bps": 5.0, "funding": True},
+    {"id": "binance-sol-v", "executor": "binance:solusdt", "instrument": "SOLUSDT", "label": "BIN · SOL perp L/S", "fee_bps": 5.0, "funding": True},
+    {"id": "okx-v",    "executor": "okx:btc-usdt-swap", "instrument": "BTC-USDT-SWAP", "label": "OKX · BTC perp L/S"},
+    {"id": "okx-eth-v","executor": "okx:eth-usdt-swap", "instrument": "ETH-USDT-SWAP", "label": "OKX · ETH perp L/S", "fee_bps": 5.0, "funding": True},
+    {"id": "okx-sol-v","executor": "okx:sol-usdt-swap", "instrument": "SOL-USDT-SWAP", "label": "OKX · SOL perp L/S", "fee_bps": 5.0, "funding": True},
+    {"id": "bybit-v",  "executor": "bybit:btcusdt",  "instrument": "BTCUSDT", "label": "BYB · BTC perp L/S"},
+    {"id": "bybit-eth-v","executor": "bybit:ethusdt","instrument": "ETHUSDT", "label": "BYB · ETH perp L/S", "fee_bps": 5.5, "funding": True},
+    {"id": "bybit-sol-v","executor": "bybit:solusdt","instrument": "SOLUSDT", "label": "BYB · SOL perp L/S", "fee_bps": 5.5, "funding": True},
+    {"id": "bybit-xrp-v","executor": "bybit:xrpusdt","instrument": "XRPUSDT", "label": "BYB · XRP perp L/S", "fee_bps": 5.5, "funding": True},
+    {"id": "bybit-doge-v","executor": "bybit:dogeusdt","instrument": "DOGEUSDT", "label": "BYB · DOGE perp L/S", "fee_bps": 5.5, "funding": True},
+    {"id": "cbse-v",    "executor": "coinbase:btc-usd", "instrument": "BTC-USD", "long_only": True, "label": "CBS · BTC spot L"},
+    {"id": "cbse-eth-v","executor": "coinbase:eth-usd", "instrument": "ETH-USD", "long_only": True, "label": "CBS · ETH spot L", "fee_bps": 8.0, "funding": False},
+    {"id": "cbse-sol-v","executor": "coinbase:sol-usd", "instrument": "SOL-USD", "long_only": True, "label": "CBS · SOL spot L", "fee_bps": 8.0, "funding": False},
+    {"id": "cbse-xrp-v","executor": "coinbase:xrp-usd", "instrument": "XRP-USD", "long_only": True, "label": "CBS · XRP spot L", "fee_bps": 8.0, "funding": False},
+    {"id": "krkn-v",    "executor": "kraken:btc-usd", "instrument": "BTC-USD", "long_only": True, "label": "KRK · BTC spot L"},
+    {"id": "krkn-eth-v","executor": "kraken:eth-usd", "instrument": "ETH-USD", "long_only": True, "label": "KRK · ETH spot L", "fee_bps": 26.0, "funding": False},
+    {"id": "krkn-sol-v","executor": "kraken:sol-usd", "instrument": "SOL-USD", "long_only": True, "label": "KRK · SOL spot L", "fee_bps": 26.0, "funding": False},
+    {"id": "krkn-xrp-v","executor": "kraken:xrp-usd", "instrument": "XRP-USD", "long_only": True, "label": "KRK · XRP spot L", "fee_bps": 26.0, "funding": False},
+    {"id": "hl-v",     "executor": "hl:btc", "instrument": "BTC", "fee_bps": 4.5, "funding": True, "label": "HL · BTC perp L/S"},
+    {"id": "hl-eth-v", "executor": "hl:eth", "instrument": "ETH", "fee_bps": 4.5, "funding": True, "label": "HL · ETH perp L/S"},
+    {"id": "hl-sol-v", "executor": "hl:sol", "instrument": "SOL", "fee_bps": 4.5, "funding": True, "label": "HL · SOL perp L/S"},
+    {"id": "aster-v",  "executor": "aster:btcusdt", "instrument": "BTCUSDT", "fee_bps": 3.5, "funding": True, "label": "ASTER · BTC perp L/S"},
+    {"id": "aster-eth-v","executor": "aster:ethusdt", "instrument": "ETHUSDT", "fee_bps": 3.5, "funding": True, "label": "ASTER · ETH perp L/S"},
+    {"id": "aster-sol-v","executor": "aster:solusdt", "instrument": "SOLUSDT", "fee_bps": 3.5, "funding": True, "label": "ASTER · SOL perp L/S"},
     {"id": "okx",      "feed": "BTC-USDT-SWAP", "label": "OKX · datos perp+spot"},
     {"id": "bybit",    "feed": "BTCUSDT", "label": "Bybit · datos perps"},
     {"id": "coinbase", "feed": "BTC-USD", "label": "Coinbase · datos spot"},
@@ -302,7 +326,9 @@ def main():
     import executors
     for v in VENUES:
         if v.get("executor"):
-            st = executors.make_state(v["instrument"])
+            st = executors.make_state(v["instrument"],
+                                      fee_bps=v.get("fee_bps", 5.0),
+                                      funding=v.get("funding", False))
             v["state"] = st
             executors.start_drainer(v["executor"], st)
     for v in VENUES:

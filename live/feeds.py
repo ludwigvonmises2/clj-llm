@@ -26,7 +26,11 @@ async def grvt_feed(instrument, on_event, stop):
             # error 3030 y SILENCIA todo el socket — medido. El spread
             # se añadirá en una conexión aparte cuando se necesite.
             for i, (stream, sel) in enumerate([
-                    ("v1.trade", f"{instrument}@50")]):
+                    ("v1.trade", f"{instrument}@50"),
+                    # mini-book @1000: rate válido de la escalera (medido;
+                    # rate inválido = error 3030 que envenena el socket).
+                    # Da quotes vivos: spread gate real y UI con pulso
+                    ("v1.mini.s", f"{instrument}@1000")]):
                 await ws.send_str(json.dumps({
                     "jsonrpc": "2.0", "method": "subscribe", "id": f"s{i}",
                     "params": {"stream": stream, "selectors": [sel]}}))
@@ -99,6 +103,78 @@ async def binance_feed(_, on_event, stop):
 
 _PINGS = set()  # refs fuertes a los pingers (GC de tasks asyncio)
 FEEDS = {"grvt": grvt_feed, "binance-all": binance_feed}
+
+
+# ---- Hyperliquid (DEX perp): trades públicos, ping de texto cada 30 s ----
+HL_WS = "wss://api.hyperliquid.xyz/ws"
+HL_COINS = ["BTC", "ETH", "SOL"]
+
+async def hyperliquid_feed(_, on_event, stop):
+    async with aiohttp.ClientSession() as s:
+        async with s.ws_connect(HL_WS, heartbeat=None) as ws:
+            for coin in HL_COINS:
+                await ws.send_str(json.dumps(
+                    {"method": "subscribe",
+                     "subscription": {"type": "trades", "coin": coin}}))
+            on_event({"type": "notice", "venue": "hl",
+                      "msg": f"perps DEX: {len(HL_COINS)} monedas"})
+
+            async def pinger():
+                while not stop.is_set():
+                    await ws.send_str(json.dumps({"method": "ping"}))
+                    await asyncio.sleep(30)
+            pt = asyncio.get_event_loop().create_task(pinger())
+            _PINGS.add(pt); pt.add_done_callback(_PINGS.discard)
+            async for msg in ws:
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        raise ConnectionError("ws cerrado")
+                    continue
+                if stop.is_set():
+                    return
+                try:
+                    m = json.loads(msg.data)
+                    if m.get("channel") != "trades":
+                        continue
+                    for r in m.get("data") or []:
+                        on_event({"type": "print",
+                                  "venue": "hl:" + r["coin"].lower(),
+                                  "sec": int(r["time"]) // 1000,
+                                  "px": float(r["px"])})
+                except Exception:
+                    pass
+
+
+# ---- Aster (DEX perp, API binance-compatible): streams @trade ----
+ASTER_WS = "wss://fstream.asterdex.com/ws"
+ASTER_SYMBOLS = ["btcusdt", "ethusdt", "solusdt"]
+
+async def aster_feed(_, on_event, stop):
+    streams = "/".join(f"{s}@trade" for s in ASTER_SYMBOLS)
+    async with aiohttp.ClientSession() as s:
+        async with s.ws_connect(f"{ASTER_WS}/{streams}", heartbeat=20) as ws:
+            on_event({"type": "notice", "venue": "aster",
+                      "msg": f"perps DEX: {len(ASTER_SYMBOLS)} símbolos (1 conexión)"})
+            async for msg in ws:
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        raise ConnectionError("ws cerrado")
+                    continue
+                if stop.is_set():
+                    return
+                try:
+                    t = json.loads(msg.data)
+                    if t.get("e") == "trade":
+                        on_event({"type": "print",
+                                  "venue": "aster:" + t["s"].lower(),
+                                  "sec": int(t["T"]) // 1000,
+                                  "px": float(t["p"])})
+                except Exception:
+                    pass
+
+
+# ---- Lighter (DEX perp zkSync): WS verificado conecta, canales
+# pendientes de confirmar contra su doc oficial — SIN INVENTAR. ----
 
 
 # ---- OKX: perps + spot en UNA conexión. Sin ping de texto el socket
@@ -254,15 +330,21 @@ async def kraken_feed(_, on_event, stop):
                     for r in (m.get("data") or []):
                         if m.get("channel") == "trade":
                             sym = r["symbol"].lower().replace("/", "-")
+                            # timestamp v2 es ISO ("...T...Z"), no epoch:
+                            # int() directo = ValueError tragado por
+                            # mensaje = cero trades de kraken (medido)
+                            ts = datetime.datetime.fromisoformat(
+                                r["timestamp"].replace("Z", "+00:00"))
                             on_event({"type": "print", "venue": f"kraken:{sym}",
-                                      "sec": int(r["timestamp"]) // 1000,
+                                      "sec": int(ts.timestamp()),
                                       "px": float(r["price"])})
                 except Exception:
                     pass
 
 
 FEEDS.update({"okx": okx_feed, "bybit": bybit_feed,
-              "coinbase": coinbase_feed, "kraken": kraken_feed})
+              "coinbase": coinbase_feed, "kraken": kraken_feed,
+              "hl": hyperliquid_feed, "aster": aster_feed})
 
 async def run_feed(venue, instrument, on_event, stop):
     """Reconnecting wrapper: a feed that stays down is not an option."""

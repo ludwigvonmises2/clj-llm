@@ -35,14 +35,52 @@
 (def reconcile-ms 10000)
 (def error-budget 12)
 
-;; Cada venue: su tag de prints en el relé, su instrumento, su
-;; timeframe y su sección del campeón. tf :s1 = scalping 1s,
-;; :m1 = swing 1m.
+;; Universo venue×activo: UN spec por mercado ejecutable. Perps L/S
+;; (:long-only ausente); spot solo-long (el venue real no permite
+;; short). Añadir un mercado aquí + 1 línea en VENUES del desk = nuevo
+;; mercado operando, con la MISMA señal kaocha-tested.
+(def ^:private perp-specs
+  [["binance-v"   "binance:btcusdt"       "BTCUSDT"]
+   ["binance-eth-v" "binance:ethusdt"     "ETHUSDT"]
+   ["binance-sol-v" "binance:solusdt"     "SOLUSDT"]
+   ["okx-v"        "okx:btc-usdt-swap"    "BTC-USDT-SWAP"]
+   ["okx-eth-v"    "okx:eth-usdt-swap"    "ETH-USDT-SWAP"]
+   ["okx-sol-v"    "okx:sol-usdt-swap"    "SOL-USDT-SWAP"]
+   ["bybit-v"      "bybit:btcusdt"        "BTCUSDT"]
+   ["bybit-eth-v"  "bybit:ethusdt"        "ETHUSDT"]
+   ["bybit-sol-v"  "bybit:solusdt"        "SOLUSDT"]
+   ["bybit-xrp-v"  "bybit:xrpusdt"        "XRPUSDT"]
+   ["bybit-doge-v" "bybit:dogeusdt"       "DOGEUSDT"]
+   ["hl-v"         "hl:btc"               "BTC"]
+   ["hl-eth-v"     "hl:eth"               "ETH"]
+   ["hl-sol-v"     "hl:sol"               "SOL"]
+   ["aster-v"      "aster:btcusdt"        "BTCUSDT"]
+   ["aster-eth-v"  "aster:ethusdt"        "ETHUSDT"]
+   ["aster-sol-v"  "aster:solusdt"        "SOLUSDT"]])
+
+(def ^:private spot-specs
+  [["cbse-v"      "coinbase:btc-usd"     "BTC-USD"]
+   ["cbse-eth-v"  "coinbase:eth-usd"     "ETH-USD"]
+   ["cbse-sol-v"  "coinbase:sol-usd"     "SOL-USD"]
+   ["cbse-xrp-v"  "coinbase:xrp-usd"     "XRP-USD"]
+   ["krkn-v"      "kraken:btc-usd"       "BTC-USD"]
+   ["krkn-eth-v"  "kraken:eth-usd"       "ETH-USD"]
+   ["krkn-sol-v"  "kraken:sol-usd"       "SOL-USD"]
+   ["krkn-xrp-v"  "kraken:xrp-usd"       "XRP-USD"]])
+
+(defn ^:private mk-spec
+  [[id tag instrument long-only]]
+  {:id id :tag tag :instrument instrument :tf :s1 :pp 31536000
+   :long-only long-only})
+
 (def venue-specs
-  [{:id "grvt"      :tag "grvt"              :instrument "BTC_USDT_Perp"  :tf :s1 :pp 31536000 :ignition true}
-   {:id "okx-v"     :tag "okx:btc-usdt-swap" :instrument "BTC-USDT-SWAP"  :tf :s1 :pp 31536000}
-   {:id "binance-v" :tag "binance:btcusdt"   :instrument "BTCUSDT"        :tf :s1 :pp 31536000}
-   {:id "alpaca"    :tag "alpaca"            :instrument "BTC/USD"        :tf :m1 :pp 525600}])
+  (vec (concat
+        [{:id "grvt" :tag "grvt" :instrument "BTC_USDT_Perp"
+          :tf :s1 :pp 31536000 :ignition true}
+         {:id "alpaca" :tag "alpaca" :instrument "BTC/USD"
+          :tf :m1 :pp 525600}]
+        (map #(mk-spec (conj % false)) perp-specs)
+        (map #(mk-spec (conj % true)) spot-specs))))
 
 (defn now-ms [] (System/currentTimeMillis))
 
@@ -192,7 +230,12 @@
                             ;; elemento ancla la posición de partida y
                             ;; el segundo es el objetivo bruto; al revés
                             ;; delta==0 para siempre (fallo F1, medido)
-                            executed (live/band-executor [pos want] 0.10)
+                            ;; spot (coinbase/kraken): el venue real no
+                            ;; permite short — clamp a no-negativo
+                            executed (live/band-executor
+                                      [pos (if (:long-only spec)
+                                             (max 0.0 want) want)]
+                                      0.10)
                             newpos (second executed)
                             delta (- newpos pos)
                             spread-bps (if (and bid ask (pos? bid))

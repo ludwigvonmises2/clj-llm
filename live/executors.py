@@ -10,15 +10,22 @@ import math, random, threading, time, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import relay
 
-FEE = 0.0005          # taker 5 bps
 LATENCY_S = (0.020, 0.060)
-TOP_DEPTH = 40.0      # BTC synthetic top-of-book depth
-HALF_SPREAD_BPS = 1.2 # synthetic half-spread at rest
+TOP_DEPTH = 40.0      # BTC synthetic top-of-book depth (fallback)
+HALF_SPREAD_BPS = 1.2 # synthetic half-spread at rest (fallback)
 PX_STALE_S = 10       # un print más viejo que esto = mercado muerto
+QUOTE_STALE_S = 5     # quote real más viejo -> sintético
+FUNDING_PER_S = 0.0001 / 28800.0   # 0.01%/8h prorrateado (perp real)
 
-def make_state(instrument):
+def make_state(instrument, fee_bps=5.0, funding=True):
+    """fee_bps = tarifa TAKER REAL del venue/mercado (binance perp 5.0,
+    bybit 5.5, okx 5.0, coinbase spot 8.0, kraken spot 26.0, hl 4.5,
+    aster 3.5). funding solo en perps (spot no paga)."""
     return {"pos": 0.0, "entry": 0.0, "realized": 0.0,
-            "instrument": instrument, "last_px": None, "last_px_ts": 0.0}
+            "instrument": instrument, "last_px": None, "last_px_ts": 0.0,
+            "real_bid": None, "real_ask": None, "real_quote_ts": 0.0,
+            "funding_accrued_ts": None,
+            "fee_bps": float(fee_bps), "funding": bool(funding)}
 
 def synthetic_book(rv, last):
     """L2 sintético: el spread se ensancha con la volatilidad 1s."""
@@ -27,24 +34,45 @@ def synthetic_book(rv, last):
 
 def execute(state, side, qty, why="signal"):
     """Fill de mercado de una orden YA DECIDIDA por el cerebro.
-    Muta state; devuelve el fill (px medio, fee, slippage, tramos)."""
+    Fidelidad al venue real: spread del LIBRO REAL cuando el quote del
+    venue está vivo (sintético solo como fallback), impacto sqrt del
+    tamaño, fees reales, funding de perp prorrateado continuo."""
     last = state["last_px"]
     # precio obsoleto = mercado muerto: NO llenar (fallo F6 del review)
     if not last or time.time() - state.get("last_px_ts", 0) > PX_STALE_S:
         return {"ok": False, "msg": "sin precio de mercado vivo"}
     time.sleep(random.uniform(*LATENCY_S) / 10)   # 2-6 ms efectivos
-    # vol 1s de los últimos prints: spread sensible al régimen
-    rv = state.get("rv")
-    hs = HALF_SPREAD_BPS + 300.0 * rv if rv else HALF_SPREAD_BPS
-    bid, ask = synthetic_book(rv, last)
+    # funding de perp prorrateado desde el último fill (0.01%/8h base):
+    # mantener posición cuesta; el scalping lo paga mínimo pero REAL.
+    # Spot nunca paga funding (state["funding"] False).
+    now = time.time()
+    if state.get("funding") and state["pos"] != 0 \
+            and state.get("funding_accrued_ts"):
+        dt = now - state["funding_accrued_ts"]
+        state["realized"] -= abs(state["pos"]) * last * FUNDING_PER_S * dt
+    state["funding_accrued_ts"] = now
+    # spread REAL del venue si el quote está vivo; sintético si no
+    qb, qa = state.get("real_bid"), state.get("real_ask")
+    if qb and qa and now - state.get("real_quote_ts", 0) < QUOTE_STALE_S:
+        bid, ask = qb, qa
+        hs = (qa - qb) / 2 / qa * 10000
+    else:
+        rv = state.get("rv")
+        hs = HALF_SPREAD_BPS + 300.0 * rv if rv else HALF_SPREAD_BPS
+        bid, ask = synthetic_book(rv, last)
     px = ask if side == "buy" else bid
+    # impacto √tamaño sobre la profundidad: el real no es lineal
     remaining, filled, cost, tranches = qty, 0.0, 0.0, []
     levels = [(TOP_DEPTH / 2, 1.0), (TOP_DEPTH, 2.5)]
-    for depth, impact in levels:
+    for depth, impact_mult in levels:
         take = min(remaining, depth)
         if take <= 0:
             break
-        slip = (hs + 300.0 * (rv or 0) / 10000 * impact) / 10000
+        # impacto extra √tamaño × vol 1s: el cruce del spread ya está
+        # en px (ask/bid); el impacto real añade raíz del llenado
+        slip_bps = 300.0 * (state.get("rv") or 0) * impact_mult \
+            * math.sqrt(take / depth)
+        slip = slip_bps / 10000
         fill_px = px * (1 + slip) if side == "buy" else px * (1 - slip)
         tranches.append((take, fill_px))
         filled += take
@@ -52,7 +80,7 @@ def execute(state, side, qty, why="signal"):
         remaining -= take
     avg_px = cost / filled if filled else last
     qty_eff = filled                      # jamás mover posición sin fill
-    fee = avg_px * qty_eff * FEE
+    fee = avg_px * qty_eff * state["fee_bps"] / 10000.0
     # CONTABILIDAD long/short (una regla, simétrica):
     #   mismo sentido y crece  -> entry ponderado, sin realized
     #   mismo sentido y reduce -> realized (avg_px - entry) * cerrado * signo
@@ -93,7 +121,15 @@ def start_drainer(tag, state):
         while True:
             try:
                 ev = q.get()
-                if ev.get("type") != "print":
+                t = ev.get("type")
+                if t == "quote":
+                    # libro REAL del venue (books5/orderbook.1): spread
+                    # fiel para los fills mientras el quote esté vivo
+                    state["real_bid"] = float(ev["bid"])
+                    state["real_ask"] = float(ev["ask"])
+                    state["real_quote_ts"] = time.time()
+                    continue
+                if t != "print":
                     continue
                 px = float(ev["px"])
                 state["last_px"] = px

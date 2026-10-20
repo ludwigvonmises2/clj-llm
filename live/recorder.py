@@ -20,6 +20,8 @@ FEEDS = [
     ("bybit", "BTCUSDT"),
     ("coinbase", "BTC-USD"),
     ("kraken", "BTC/USD"),
+    ("hl", "BTC"),
+    ("aster", "BTCUSDT"),
 ]
 
 def tape_write(venue, ev):
