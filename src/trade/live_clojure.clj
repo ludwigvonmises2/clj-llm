@@ -192,7 +192,7 @@
                             ;; elemento ancla la posición de partida y
                             ;; el segundo es el objetivo bruto; al revés
                             ;; delta==0 para siempre (fallo F1, medido)
-                            executed (live/band-executor [pos want] 0.0)
+                            executed (live/band-executor [pos want] 0.10)
                             newpos (second executed)
                             delta (- newpos pos)
                             spread-bps (if (and bid ask (pos? bid))
@@ -387,10 +387,8 @@
     ;; handshake con límite duro: un deref bloqueante sin timeout se
     ;; cuelga en silencio (fallo medido hoy) — si falla, lo grita y el
     ;; watchdog del loop fuerza el reinicio limpio
-    (let [fut (.buildAsync ^WebSocket$Builder
-               (.newWebSocketBuilder (HttpClient/newHttpClient)
-                                     ^URI (URI/create ws-url)
-                                     ^WebSocket$Listener listener))]
+    (let [builder (.newWebSocketBuilder (HttpClient/newHttpClient))
+          fut (.buildAsync builder (URI/create ws-url) listener)]
       (try
         @(.orTimeout fut 15 java.util.concurrent.TimeUnit/SECONDS)
         (catch Exception e
