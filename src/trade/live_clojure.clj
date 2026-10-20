@@ -19,8 +19,7 @@
   (:require [clojure.string :as str]
             [clojure.edn :as edn]
             [cheshire.core :as json]
-            [trade.signals :as signals]
-            [trade.live :as live])
+            [trade.signals :as signals])
   (:import (java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers WebSocket WebSocket$Builder
                           WebSocket$Listener)
            (java.net URI)
@@ -71,16 +70,38 @@
 (defn ^:private mk-spec
   [[id tag instrument long-only]]
   {:id id :tag tag :instrument instrument :tf :s1 :pp 31536000
-   :long-only long-only})
+   :long-only long-only :capital-usd 10000.0})
 
 (def venue-specs
   (vec (concat
         [{:id "grvt" :tag "grvt" :instrument "BTC_USDT_Perp"
-          :tf :s1 :pp 31536000 :ignition true}
+          :tf :s1 :pp 31536000 :ignition true :capital-usd 1000.0}
          {:id "alpaca" :tag "alpaca" :instrument "BTC/USD"
-          :tf :m1 :pp 525600}]
+          :tf :m1 :pp 525600 :capital-usd 10000.0}]
         (map #(mk-spec (conj % false)) perp-specs)
         (map #(mk-spec (conj % true)) spot-specs))))
+
+(def ^:private min-order-usd 1.0)
+(def ^:private band 0.10)
+
+(defn trim-window
+  "conj x and keep the last n — copied, so the backing array is freed
+  (subvec+conj kept every close ever seen alive: R5)."
+  [v x n]
+  (let [v (conj v x) c (count v)]
+    (if (> c n) (into [] (subvec v (- c n))) v)))
+
+(defn valid-px? [x] (and (number? x) (Double/isFinite (double x)) (pos? (double x))))
+
+(defn weight->units
+  "The signal speaks in exposure weights (fraction of capital, as in the
+  backtest); venues speak in coin units. 1.0 = capital-usd of notional."
+  ^double [^double weight ^double capital-usd ^double px]
+  (if (pos? px) (/ (* weight capital-usd) px) 0.0))
+
+(defn units->weight
+  ^double [^double units ^double capital-usd ^double px]
+  (if (pos? capital-usd) (/ (* units px) capital-usd) 0.0))
 
 (defn now-ms [] (System/currentTimeMillis))
 
@@ -188,6 +209,54 @@
                                (double (dec w))))]
           (if (pos? sd) (/ sk (* sd (Math/sqrt (double k)))) 0.0)))))
 
+;; DECISION CORE, pure: state in -> action out. decide! only performs the
+;; effects (emit / order). Everything the brain decides is testable here.
+(defn plan
+  "cs: closes window (already including px); pos-u: venue position in
+  UNITS. Returns {:action :warming} until w closes exist, else the target
+  and one action: :throttle | :ignite | :gate | :order | :hold."
+  [{:keys [cs k w threshold side spec px pos-u bid ask since-last-ms ignited?]}]
+  (cond
+    (< (count cs) w) {:action :warming}
+    (not (valid-px? px)) {:action :hold :pos-u pos-u}
+    :else
+    (let [cap (double (:capital-usd spec 10000.0))
+          px (double px)
+          pos-u (double pos-u)
+          ;; the signal speaks WEIGHTS (as in the backtest); venues, units
+          pos (units->weight pos-u cap px)
+          z-now (z-of cs k w)
+          want (double (peek (signals/mr-zscore
+                              {:closes cs :k k :w w :threshold threshold
+                               :side (or side :long-dip)
+                               :target-vol 0.30 :max-lev 2.0 :ppy (:pp spec)})))
+          ;; CONTRATO: [sentinel target] — el PRIMER elemento ancla la
+          ;; posición de partida (fallo F1); spot: clamp a no-negativo
+          want (if (:long-only spec) (max 0.0 want) want)
+          ;; no-trade band measured from the HELD weight, exactly as
+          ;; band-executor does bar to bar in the backtest (R10: the
+          ;; [pos want] sentinel measured it from 0 and dumped |pos|<=0.10)
+          newpos (if (> (Math/abs (- want pos)) band) want pos)
+          newpos-u (weight->units newpos cap px)
+          delta-u (- newpos-u pos-u)
+          spread-bps (if (and bid ask (pos? (double bid)))
+                       (* 10000.0 (/ (- (double ask) (double bid)) (double bid)))
+                       9999.0)
+          base {:z z-now :target newpos :newpos-u newpos-u :pos-u pos-u
+                :spread-bps spread-bps}]
+      (assoc base :action
+             (cond
+               (< (double since-last-ms) min-order-gap-ms) :throttle
+               (and (:ignition spec) (zero? pos-u) (not ignited?)) :ignite
+               ;; >= $1 notional: the units<->weight round trip leaves
+               ;; ~1e-16 residue that must not trade
+               (< (* (Math/abs delta-u) px) min-order-usd) :hold
+               (and (< spread-bps 9000.0) (pos? delta-u)
+                    (> spread-bps max-spread-bps)) :gate
+               :else :order)
+             :side (if (pos? delta-u) "buy" "sell")
+             :qty (Math/abs delta-u)))))
+
 (defn -main [& args]
   (let [dry (some #{"--dry"} args)
         ;; runtime por venue: barras, posición, libro, throttle, mtm
@@ -213,38 +282,23 @@
                         {:keys [k w threshold side]} (champion-params
                                                       (if (= :s1 (:tf spec))
                                                         :scalp :swing))
-                        closes (swap! (:closes st) conj px)
-                        _ (when (> (count closes) (* 2 w))
-                            (swap! (:closes st) subvec (- (count closes) (* 2 w))))
-                        cs (vec @(:closes st))
-                        n (count cs)]
-                    (if (< n w)
+                        cs (swap! (:closes st) trim-window px (* 2 w))]
+                    (let [{:keys [action z target newpos-u pos-u spread-bps]
+                           :as pl}
+                          (plan {:cs cs :k k :w w :threshold threshold
+                                 :side side :spec spec :px px :pos-u pos
+                                 :bid bid :ask ask
+                                 :since-last-ms (- (now-ms) @(:last-order st))
+                                 :ignited? @(:ignited st)})]
+                     (if (= action :warming)
                       pos
-                      (let [z-now (z-of cs k w)
-                            sigs (signals/mr-zscore
-                                  {:closes cs :k k :w w :threshold threshold
-                                   :side (or side :long-dip)
-                                   :target-vol 0.30 :max-lev 2.0 :ppy (:pp spec)})
-                            want (double (peek sigs))
-                            ;; CONTRATO: [sentinel target] — el PRIMER
-                            ;; elemento ancla la posición de partida y
-                            ;; el segundo es el objetivo bruto; al revés
-                            ;; delta==0 para siempre (fallo F1, medido)
-                            ;; spot (coinbase/kraken): el venue real no
-                            ;; permite short — clamp a no-negativo
-                            executed (live/band-executor
-                                      [pos (if (:long-only spec)
-                                             (max 0.0 want) want)]
-                                      0.10)
-                            newpos (second executed)
-                            delta (- newpos pos)
-                            spread-bps (if (and bid ask (pos? bid))
-                                         (* 10000.0 (/ (- ask bid) bid))
-                                         9999.0)]
+                      (let [z-now z
+                            newpos target
+                            pos (units->weight pos-u (double (:capital-usd spec 10000.0)) px)]
                         ;; MILISEGUNDOS (C1): µs rompía los ejes de los
                         ;; gráficos y podía congelar el desk completo
                         (emit {:type "bar" :venue id :ts (now-ms)
-                               :close px :target newpos :position pos
+                               :close px :target newpos :position pos-u
                                :z z-now
                                :spread (when (< spread-bps 9000.0)
                                          (format "%.1f" spread-bps))})
@@ -260,7 +314,8 @@
                                            (not (zero? newpos))
                                            (neg? (* pos newpos)))
                               closed-trip (or (zero? newpos) flipped)
-                              rets2 (if (not (zero? pos)) (conj rets ret) rets)
+                              rets2 (if (not (zero? pos))
+                                      (trim-window rets ret 2000) rets)
                               nr (count rets2)
                               m (if (pos? nr) (/ (reduce + rets2) nr) 0.0)
                               sd (if (> nr 2)
@@ -277,7 +332,7 @@
                                  :wins (if (and closed-trip (pos? ret))
                                          (inc (:wins @mtm)) (:wins @mtm))
                                  :realized (if closed-trip
-                                             (+ (:realized @mtm) (* pos (- px entry)))
+                                             (+ (:realized @mtm) (* pos-u (- px entry)))
                                              (:realized @mtm))
                                  :tick (inc tick))
                           (when (zero? (mod (inc tick) 50))
@@ -286,7 +341,7 @@
                                            0.0)
                                   pnl (+ (:realized @mtm)
                                          (if (not (zero? newpos))
-                                           (* newpos
+                                           (* newpos-u
                                               (- px (if (not (zero? (:entry @mtm)))
                                                       (:entry @mtm) px)))
                                            0.0))]
@@ -294,44 +349,38 @@
                                      :pnl (double pnl) :sharpe (double sharpe)
                                      :maxdd (double (max 0.0 (- 1.0 (/ eq2 new-peak))))
                                      :wins (:wins @mtm) :trips (:trips @mtm)}))))
-                        ;; ejecución: ignition solo en venues reales
-                        (let [known-spread (< spread-bps 9000.0)
-                              gate-blocked (and known-spread
-                                                (pos? delta)
-                                                (> spread-bps max-spread-bps))
-                              throttle (< (- (now-ms) @(:last-order st))
-                                          min-order-gap-ms)
-                              ignition? (and (:ignition spec) (zero? pos)
-                                             (not @(:ignited st)))]
-                          (cond
-                            throttle pos
-                            ignition?
-                            (do (reset! (:ignited st) true)
-                                (let [r (venue-order! id "buy" 0.002
-                                                      {:z z-now :target newpos
-                                                       :spread spread-bps
-                                                       :why "ignition"})]
-                                  (emit {:type "order" :venue id :side "buy"
-                                         :qty 0.002 :px px :why "ignition"
-                                         :z z-now :resp (str r)})
-                                  (if (:ok r) 0.002 pos)))
-                            (pos? (Math/abs ^double delta))
-                            (if gate-blocked
-                              (do (emit {:type "notice" :venue id
-                                         :msg (format "entrada retenida: spread %.1f bps"
-                                                      spread-bps)})
-                                  pos)
-                              (let [side-o (if (pos? delta) "buy" "sell")
-                                    r (venue-order! id side-o (Math/abs ^double delta)
+                        ;; ejecución: el plan ya decidió; aquí solo efectos
+                        (case action
+                          (:throttle :hold) pos-u
+                          :ignite
+                          (do (reset! (:ignited st) true)
+                              (let [r (venue-order! id "buy" 0.002
                                                     {:z z-now :target newpos
                                                      :spread spread-bps
-                                                     :why "scalp"})]
-                                (reset! (:last-order st) (now-ms))
-                                (emit {:type "order" :venue id :side side-o
-                                       :qty (Math/abs ^double delta) :px px
+                                                     :why "ignition"})]
+                                (emit {:type "order" :venue id :side "buy"
+                                       :qty 0.002 :px px :why "ignition"
                                        :z z-now :resp (str r)})
-                                (if (:ok r) newpos pos)))
-                            :else pos))))))
+                                (if (:ok r) 0.002 pos-u)))
+                          :gate
+                          (do (emit {:type "notice" :venue id
+                                     :msg (format "entrada retenida: spread %.1f bps"
+                                                  spread-bps)})
+                              pos-u)
+                          :order
+                          (let [r (venue-order! id (:side pl) (:qty pl)
+                                                {:z z-now :target newpos
+                                                 :spread spread-bps
+                                                 :why "scalp"})]
+                            (reset! (:last-order st) (now-ms))
+                            (emit {:type "order" :venue id :side (:side pl)
+                                   :qty (:qty pl) :px px
+                                   :z z-now :resp (str r)})
+                            ;; the venue's own post-fill position wins
+                            ;; (partial fills), else the planned one
+                            (if (:ok r)
+                              (let [vp (:pos r)] (if (number? vp) (double vp) newpos-u))
+                              pos-u))))))))
         ;; cierra la vela de un venue (prints 1s) y decide
         on-close! (fn [id px sec]
                     (let [st (get @rt id)]
@@ -345,13 +394,16 @@
                                                         (= (:tag (:spec s))
                                                            (:venue m)))
                                                       @rt))]
-                     (when st
+                     (when (and st (valid-px? (:px m)))
                        (let [px (double (:px m)) sec (long (:sec m))
                              closer (:closer st)]
                          (if (or (nil? @closer) (= sec (:sec @closer)))
                            (reset! closer {:sec sec :px px})
-                           (do (on-close! venue-id (:px @closer) (:sec @closer))
-                               (reset! closer {:sec sec :px px})))))))
+                           (let [{cpx :px csec :sec} @closer]
+                             ;; advance FIRST: a throwing decision must not
+                             ;; re-close the same bar on every print (R12)
+                             (reset! closer {:sec sec :px px})
+                             (on-close! venue-id cpx csec)))))))
         on-bar-1m (fn [m]
                     ;; swing: velas 1m ya cerradas que publica el venue.
                     ;; ANTI-ECO (fallo C3): los bar del PROPIO cerebro
@@ -363,13 +415,14 @@
                                                   (= (:tag (:spec s))
                                                      (:venue m)))
                                                 @rt))]
-                      (when (and st (nil? (:target m)) (number? (:close m)))
+                      (when (and st (nil? (:target m)) (valid-px? (:close m)))
                         (let [ts (long (:ts m))]
                           (when (> ts @(:last-bar-ts st))
                             (reset! (:last-bar-ts st) ts)
-                            (decide! {:id (:id (:spec st)) :spec (:spec st)
-                                      :px (double (:close m)) :pos @(:pos st)
-                                      :bid @(:bid st) :ask @(:ask st)}))))))
+                            (reset! (:pos st)
+                                    (decide! {:id (:id (:spec st)) :spec (:spec st)
+                                              :px (double (:close m)) :pos @(:pos st)
+                                              :bid @(:bid st) :ask @(:ask st)})))))))
         listener (reify WebSocket$Listener
                    ;; CONTRATO java: cada método devuelve CompletionStage
                    ;; o null. Devolver lo último evaluado (p.ej. la

@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import relay
 
 LATENCY_S = (0.020, 0.060)
-TOP_DEPTH = 40.0      # BTC synthetic top-of-book depth (fallback)
+TOP_DEPTH_USD = 3.2e6 # synthetic top-of-book depth in NOTIONAL (≈40 BTC);
+                      # units per asset = USD / price (60 'units' of BTC
+                      # was applied to SOL/XRP/DOGE alike: R2)
 HALF_SPREAD_BPS = 1.2 # synthetic half-spread at rest (fallback)
 PX_STALE_S = 10       # un print más viejo que esto = mercado muerto
 QUOTE_STALE_S = 5     # quote real más viejo -> sintético
@@ -63,7 +65,8 @@ def execute(state, side, qty, why="signal"):
     px = ask if side == "buy" else bid
     # impacto √tamaño sobre la profundidad: el real no es lineal
     remaining, filled, cost, tranches = qty, 0.0, 0.0, []
-    levels = [(TOP_DEPTH / 2, 1.0), (TOP_DEPTH, 2.5)]
+    depth_u = TOP_DEPTH_USD / last
+    levels = [(depth_u / 2, 1.0), (depth_u, 2.5)]
     for depth, impact_mult in levels:
         take = min(remaining, depth)
         if take <= 0:
@@ -106,7 +109,7 @@ def execute(state, side, qty, why="signal"):
     state["pos"] = new_pos
     state["entry"] = new_entry
     state["realized"] = state["realized"] + realized_delta - fee
-    return {"ok": True, "avg_px": avg_px, "fee": fee,
+    return {"ok": True, "avg_px": avg_px, "fee": fee, "filled": qty_eff,
             "tranches": len(tranches),
             "slippage_bps": abs(avg_px / last - 1) * 10000,
             "pos": state["pos"], "realized": state["realized"], "why": why}

@@ -93,6 +93,8 @@ def start_engine(venue_id, mod, dry=False):
             time.sleep(3)
     threading.Thread(target=worker, daemon=True).start()
 
+MAX_ORDER_USD = 50_000.0
+
 async def flatten(request):
     venue = request.match_info["venue"]
     v = next((v for v in VENUES if v["id"] == venue), None)
@@ -105,6 +107,12 @@ async def flatten(request):
                                   abs(pos), why="flatten")
             if r.get("ok"):
                 persist_executor(venue, v)
+                # the flatten is a fill too: without it the round trip
+                # never closes and every later fill merges into it (R8)
+                store.order(venue, int(time.time() * 1000),
+                            "sell" if pos > 0 else "buy", r["filled"],
+                            r["avg_px"], f"{venue}-flatten", why="flatten",
+                            fee=r["fee"])
                 ok, msg = True, f"flatten {pos} @ {r['avg_px']:.2f}"
             else:
                 ok, msg = False, f"flatten falló: {r.get('msg')}"
@@ -150,7 +158,11 @@ async def place_order(request):
     except (TypeError, ValueError):
         return web.json_response({"ok": False, "msg": "qty inválida"})
     import math as _m
-    if not (_m.isfinite(qty) and 0 < qty <= 100):
+    # cap in NOTIONAL (R2: 100 coin units blocked every XRP/DOGE entry and
+    # let through $8M of BTC); unit cap only while no price is known
+    ref_px = (v.get("state") or {}).get("last_px")
+    limit_ok = (qty * ref_px <= MAX_ORDER_USD) if ref_px else qty <= 100
+    if not (_m.isfinite(qty) and qty > 0 and limit_ok):
         return web.json_response({"ok": False, "msg": "qty fuera de límites"})
     # FAIL-CLOSED (fallo C2): un side ausente jamás rellena como SELL
     if side not in ("buy", "sell"):
@@ -161,7 +173,9 @@ async def place_order(request):
         r = executors.execute(v["state"], side, qty, why=why)
         if r.get("ok"):
             persist_executor(venue, v)
-            store.order(venue, int(time.time() * 1000), side, qty,
+            # FILLED quantity, not requested (R9: partial fills corrupted
+            # the round trips)
+            store.order(venue, int(time.time() * 1000), side, r["filled"],
                         r["avg_px"], f"{venue}-{int(time.time() * 1000)}",
                         z=body.get("z"), target=body.get("target"),
                         spread=body.get("spread"), why=why, fee=r["fee"])
@@ -177,7 +191,13 @@ async def place_order(request):
     try:
         if venue == "grvt":
             r = api.create_order(inst, "market", side, qty)
-            resp = {"order_id": str(r.get("order_id", r))[:40]}
+            # the SDK returns {} on an exchange REJECT instead of raising:
+            # that is a failure, never a phantom ok (R3)
+            oid = (r or {}).get("order_id") or \
+                ((r or {}).get("metadata") or {}).get("client_order_id")
+            if not oid:
+                return web.json_response({"ok": False, "msg": f"grvt rechazó: {str(r)[:120]}"})
+            resp = {"order_id": str(oid)[:40]}
         else:
             from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
             from alpaca.trading.enums import OrderSide, TimeInForce

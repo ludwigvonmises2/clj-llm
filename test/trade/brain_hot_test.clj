@@ -59,3 +59,15 @@
           bs (hot/block-bootstrap base rng)]
       (is (>= (count bs) (count base)) "cubre la longitud del original")
       (is (every? #(> % 90.0) (take 50 bs)) "valores del mismo dominio"))))
+
+(deftest weight-units-roundtrip
+  (testing "the same weight buys the same NOTIONAL on every asset (fallo: 1 BTC vs 1 XRP)"
+    (let [btc (brain/weight->units 1.0 10000.0 80000.0)
+          xrp (brain/weight->units 1.0 10000.0 1.3)]
+      (is (< (Math/abs (- (* btc 80000.0) 10000.0)) 1e-6))
+      (is (< (Math/abs (- (* xrp 1.3) 10000.0)) 1e-6))))
+  (testing "units->weight inverts weight->units"
+    (is (< (Math/abs (- 0.37 (brain/units->weight (brain/weight->units 0.37 5000.0 104.7) 5000.0 104.7))) 1e-12)))
+  (testing "zero price / capital never divide by zero"
+    (is (= 0.0 (brain/weight->units 1.0 10000.0 0.0)))
+    (is (= 0.0 (brain/units->weight 1.0 0.0 100.0)))))

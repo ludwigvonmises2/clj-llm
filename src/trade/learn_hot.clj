@@ -70,7 +70,7 @@
       (if (>= i n)
         out
         (let [start (rand-int n)
-              blen (+ 30 (rand-int 150))]
+              blen (+ 30 (long (rand-int 150)))]
           (recur (into out (take blen (drop start (cycle closes))))
                  (+ i blen)))))))
 
@@ -83,6 +83,28 @@
                    (vreset! prev nx)
                    nx)))
           (rest closes))))
+
+(defn write-champion-section!
+  "Atomic tmp+move write of ONE section (:scalp / :swing / :profile) of
+  the champion file, preserving the others: a brain reading mid-write
+  never sees broken EDN (F9) and no learner path erases another's
+  champion (the profiles path used to spit a flat map over everything)."
+  ([section m] (write-champion-section! "live/champion.edn" section m))
+  ([path section m]
+   (let [prev (try (edn/read-string (slurp path)) (catch Exception _ {}))
+         tmp (str path ".tmp")]
+     (spit tmp (str (assoc (if (map? prev) prev {}) section m) "\n"))
+     (java.nio.file.Files/move
+      (java.nio.file.Paths/get tmp (into-array String []))
+      (java.nio.file.Paths/get path (into-array String []))
+      (into-array java.nio.file.StandardCopyOption
+                  [java.nio.file.StandardCopyOption/REPLACE_EXISTING
+                   java.nio.file.StandardCopyOption/ATOMIC_MOVE])))))
+
+(defn tapes-promote?
+  "Honest gate: wins on >= 60 % of venues and never with zero wins."
+  [wins of]
+  (and (pos? wins) (pos? of) (>= wins (long (Math/ceil (* 0.6 of))))))
 
 (defn main
   [& args]
@@ -130,12 +152,9 @@
         ;; ganados no hay campeón (regla 3)
         campeon (last (sort-by (juxt :real-wins :synth-rate) resultados))]
     (if (pos? (:real-wins campeon))
-      (do (spit "live/champion.edn"
-                (str "{:k " (:k campeon) " :w " (:w campeon)
-                     " :threshold " (:threshold campeon)
-                     " :name \"" (:name campeon) "\""
-                     " :real-wins " (:real-wins campeon)
-                     " :real-folds " (:real-folds campeon) "}\n"))
+      (do (write-champion-section! :profile
+                                   (select-keys campeon [:k :w :threshold :name
+                                                         :real-wins :real-folds]))
           (println "campeón:" (:name campeon) "→ live/champion.edn"))
       (println "PERFILES: ninguno gana pliegues — no se promueve"))))
 
@@ -163,9 +182,9 @@
         vecinos (fn [cfg]
                   (let [cs (filter (fn [c]
                                      (and (not= c cfg)
-                                          (<= (Math/abs (- (:k c) (:k cfg))) 20)
-                                          (<= (Math/abs (- (:w c) (:w cfg))) 120)
-                                          (<= (Math/abs (- (:threshold c) (:threshold cfg))) 0.5)))
+                                          (<= (Math/abs (- (long (:k c)) (long (:k cfg)))) 20)
+                                          (<= (Math/abs (- (long (:w c)) (long (:w cfg)))) 120)
+                                          (<= (Math/abs (- (double (:threshold c)) (double (:threshold cfg)))) 0.5)))
                                    scored)]
                     (if (seq cs)
                       (/ (reduce + (map :score cs)) (count cs))
@@ -184,20 +203,11 @@
                          (:score campeon) (:vecinos campeon)))
         ;; escritura ATÓMICA preservando :swing aprendido (fallo M8: el
         ;; placeholder pisaba el swing del ciclo --1m)
-        (let [prev (try (edn/read-string (slurp "live/champion.edn"))
-                        (catch Exception _ {}))
-              tmp "live/champion.edn.tmp"]
-          (spit tmp (str (assoc (or prev {})
-                                :scalp {:k (:k campeon) :w (:w campeon)
+        (write-champion-section! :scalp {:k (:k campeon) :w (:w campeon)
                                         :threshold (:threshold campeon)
                                         :name "scalping-grid"
                                         :score (:score campeon)
-                                        :vecinos (:vecinos campeon)}) "\n"))
-          (java.nio.file.Files/move
-           (java.nio.file.Paths/get (str tmp) (into-array String []))
-           (java.nio.file.Paths/get "live/champion.edn" (into-array String []))
-           (into-array java.nio.file.StandardCopyOption
-                       [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))))
+                                        :vecinos (:vecinos campeon)}))
       (println "SCALP: ninguna config gana pliegues con costes reales —"
                "NO se promueve campeón (la señal pura no basta en 1s)"))
     campeon))
@@ -231,9 +241,9 @@
   venue:activo, las n-más largas primero."
   [dir n max-closes]
   (->> (file-seq (io/file dir))
-       (filter (fn [f] (-> (.getName f) (.endsWith ".prints"))))
-       (sort-by #(.lastModified %) >)
-       (map (fn [f]
+       (filter (fn [^java.io.File f] (.endsWith (.getName f) ".prints")))
+       (sort-by (fn [^java.io.File f] (.lastModified f)) >)
+       (map (fn [^java.io.File f]
               (let [nm (.getName f)                       ; 20261020_okx:btc-usdt-swap.prints
                     tag (subs nm 9 (- (count nm) 7))]
                 {:venue tag
@@ -296,27 +306,16 @@
                             (flush))
                    (assoc cfg :wins wins :of (count series)))))
               campeon (last (sort-by :wins ranked))]
-          (let [promoted? (and (pos? (:wins campeon))
-                               (>= (:wins campeon)
-                                   (int (Math/ceil (* 0.6 (:of campeon))))))]
+          (let [promoted? (tapes-promote? (:wins campeon) (:of campeon))]
             (if promoted?
               (do (println (format "CAMPEÓN TAPES: k=%d w=%d z=%.1f -> %d/%d venues"
                                    (:k campeon) (:w campeon) (:threshold campeon)
                                    (:wins campeon) (:of campeon)))
-                  (let [prev (try (edn/read-string (slurp "live/champion.edn"))
-                                  (catch Exception _ {}))
-                        tmp "live/champion.edn.tmp"]
-                    (spit tmp (str (assoc (or prev {})
-                                          :scalp {:k (:k campeon) :w (:w campeon)
+                  (write-champion-section! :scalp {:k (:k campeon) :w (:w campeon)
                                                   :threshold (:threshold campeon)
                                                   :name "scalp-tapes"
                                                   :wins (:wins campeon)
-                                                  :of (:of campeon)}) "\n"))
-                    (java.nio.file.Files/move
-                     (java.nio.file.Paths/get (str tmp) (into-array String []))
-                     (java.nio.file.Paths/get "live/champion.edn" (into-array String []))
-                     (into-array java.nio.file.StandardCopyOption
-                                 [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))))
+                                                  :of (:of campeon)}))
               (println "TAPES: ninguna config gana en ≥60% de venues —"
                        "no se promueve campeón"))
             ;; PRUEBA DE APRENDIZAJE (L137): cada ciclo deja su estado
@@ -348,21 +347,10 @@
     (println (format "CAMPEÓN SWING: k=%d w=%d z=%.1f | %d/%d pliegues"
                      (:k campeon) (:w campeon) (:threshold campeon)
                      (:wins campeon) (:folds campeon)))
-    (let [prev (try (edn/read-string (slurp "live/champion.edn"))
-                    (catch Exception _ {}))
-          tmp "live/champion.edn.tmp"]
-      ;; escritura ATÓMICA: un cerebro leyendo a mitad de spit lee EDN
-      ;; roto y cae a defaults 30 s (fallo F9 del review)
-      (spit tmp (str (assoc-in (or prev {}) [:swing]
-                               {:k (:k campeon) :w (:w campeon)
+    (write-champion-section! :swing {:k (:k campeon) :w (:w campeon)
                                 :threshold (:threshold campeon)
                                 :name "swing-grid" :wins (:wins campeon)
-                                :folds (:folds campeon)}) "\n"))
-      (java.nio.file.Files/move
-       (java.nio.file.Paths/get (str tmp) (into-array String []))
-       (java.nio.file.Paths/get "live/champion.edn" (into-array String []))
-       (into-array java.nio.file.StandardCopyOption
-                   [java.nio.file.StandardCopyOption/REPLACE_EXISTING])))
+                                :folds (:folds campeon)})
     campeon))
 
 (defn -main [& args]
