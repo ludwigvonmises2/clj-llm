@@ -125,15 +125,19 @@
             (println (format "  %-11s real %d/%d | sintético %s"
                              (:name r) (:real-wins r) (:real-folds r)
                              (format "%.2f" (:synth-rate r)))))
-        ;; campeón: más pliegues reales ganados; desempate por tasa sintética
-        campeon (first (sort-by (juxt :real-wins :synth-rate) > resultados))]
-    (spit "live/champion.edn"
-          (str "{:k " (:k campeon) " :w " (:w campeon)
-               " :threshold " (:threshold campeon)
-               " :name \"" (:name campeon) "\""
-               " :real-wins " (:real-wins campeon)
-               " :real-folds " (:real-folds campeon) "}\n"))
-    (println "campeón:" (:name campeon) "→ live/champion.edn")))
+        ;; orden natural [wins rate], último = mejor (juxt+> rompe:
+        ;; el comparador recibe un vector); PUERTA: sin pliegues
+        ;; ganados no hay campeón (regla 3)
+        campeon (last (sort-by (juxt :real-wins :synth-rate) resultados))]
+    (if (pos? (:real-wins campeon))
+      (do (spit "live/champion.edn"
+                (str "{:k " (:k campeon) " :w " (:w campeon)
+                     " :threshold " (:threshold campeon)
+                     " :name \"" (:name campeon) "\""
+                     " :real-wins " (:real-wins campeon)
+                     " :real-folds " (:real-folds campeon) "}\n"))
+          (println "campeón:" (:name campeon) "→ live/champion.edn"))
+      (println "PERFILES: ninguno gana pliegues — no se promueve"))))
 
 (defn ^:private grid-1s
   "Entrenamiento del SCALPING AGRESIVO: grid de la familia sobre el
@@ -167,25 +171,35 @@
                       (/ (reduce + (map :score cs)) (count cs))
                       0.0)))
         ranked (map (fn [c] (assoc c :vecinos (vecinos c))) scored)
-        campeon (first (sort-by (juxt :vecinos :score) > ranked))]
-    (println (format "CAMPEÓN SCALP: k=%d w=%d z=%.1f | score %.2f | vecinos %.2f"
-                     (:k campeon) (:w campeon) (:threshold campeon)
-                     (:score campeon) (:vecinos campeon)))
-    ;; escritura ATÓMICA preservando :swing aprendido (fallo M8: el
-    ;; placeholder pisaba el swing del ciclo --1m)
-    (let [prev (try (edn/read-string (slurp "live/champion.edn"))
-                    (catch Exception _ {}))
-          tmp "live/champion.edn.tmp"]
-      (spit tmp (str (assoc (or prev {})
-                            :scalp {:k (:k campeon) :w (:w campeon)
-                                    :threshold (:threshold campeon)
-                                    :name "scalping-grid" :score (:score campeon)
-                                    :vecinos (:vecinos campeon)}) "\n"))
-      (java.nio.file.Files/move
-       (java.nio.file.Paths/get (str tmp) (into-array String []))
-       (java.nio.file.Paths/get "live/champion.edn" (into-array String []))
-       (into-array java.nio.file.StandardCopyOption
-                   [java.nio.file.StandardCopyOption/REPLACE_EXISTING])))
+        ;; orden natural por [vecinos score] y ÚLTIMO = mejor (sort-by
+        ;; con juxt+> rompe: el comparador recibe un vector, no un nº)
+        campeon (last (sort-by (juxt :vecinos :score) ranked))]
+    ;; PUERTA DE PROMOCIÓN (regla 3): un campeón con score 0 — que no
+    ;; gana NI UN pliegue con costes reales — jamás se promueve; el
+    ;; cerebro sigue con sus defaults validados o con lo que haya
+    (if (pos? (:score campeon))
+      (do
+        (println (format "CAMPEÓN SCALP: k=%d w=%d z=%.1f | score %.2f | vecinos %.2f"
+                         (:k campeon) (:w campeon) (:threshold campeon)
+                         (:score campeon) (:vecinos campeon)))
+        ;; escritura ATÓMICA preservando :swing aprendido (fallo M8: el
+        ;; placeholder pisaba el swing del ciclo --1m)
+        (let [prev (try (edn/read-string (slurp "live/champion.edn"))
+                        (catch Exception _ {}))
+              tmp "live/champion.edn.tmp"]
+          (spit tmp (str (assoc (or prev {})
+                                :scalp {:k (:k campeon) :w (:w campeon)
+                                        :threshold (:threshold campeon)
+                                        :name "scalping-grid"
+                                        :score (:score campeon)
+                                        :vecinos (:vecinos campeon)}) "\n"))
+          (java.nio.file.Files/move
+           (java.nio.file.Paths/get (str tmp) (into-array String []))
+           (java.nio.file.Paths/get "live/champion.edn" (into-array String []))
+           (into-array java.nio.file.StandardCopyOption
+                       [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))))
+      (println "SCALP: ninguna config gana pliegues con costes reales —"
+               "NO se promueve campeón (la señal pura no basta en 1s)"))
     campeon))
 
 (defn ^:private grid-1m
