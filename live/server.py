@@ -127,27 +127,38 @@ async def flatten(request):
         return web.json_response({"ok": ok, "msg": msg})
     api = (v.get("state") or {}).get("api")
     inst = (v.get("state") or {}).get("instrument")
-    pos = (v.get("state") or {}).get("pos", 0.0)
     ok, msg = False, "engine no disponible"
-    # corto o largo: el flatten invierte el signo con orden de mercado
-    if api is not None and abs(pos) > 1e-9:
+    if api is not None:
         try:
+            # rule 2: flatten what the VENUE holds now, not a 10 s old cache
             if venue == "grvt":
-                api.create_order(inst, "market",
-                                 "sell" if pos > 0 else "buy", abs(pos))
+                rows = await asyncio.to_thread(api.fetch_positions)
+                pos = next((float(p["size"]) for p in rows
+                            if p.get("instrument") == inst), 0.0)
             else:
-                from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+                allp = await asyncio.to_thread(api.get_all_positions)
+                pos = next((float(p.qty) for p in allp
+                            if p.symbol == inst.replace("/", "")), 0.0)
+            if abs(pos) <= 1e-9:
+                ok, msg = True, "posición ya plana"
+            elif venue == "grvt":
+                r = await asyncio.to_thread(api.create_order, inst, "market",
+                                            "sell" if pos > 0 else "buy", abs(pos))
+                if (r or {}).get("order_id") or ((r or {}).get("metadata") or {}).get("client_order_id"):
+                    ok, msg = True, f"flatten {pos} {inst} enviado"
+                else:
+                    msg = f"flatten sin confirmar: {str(r)[:100]} (reconcile dirá)"
+            else:
+                from alpaca.trading.requests import MarketOrderRequest
                 from alpaca.trading.enums import OrderSide, TimeInForce
-                api.submit_order(MarketOrderRequest(
+                await asyncio.to_thread(api.submit_order, MarketOrderRequest(
                     symbol=inst.replace("/", ""), qty=abs(pos),
                     side=OrderSide.SELL if pos > 0 else OrderSide.BUY,
                     time_in_force=TimeInForce.GTC))
-            ok, msg = True, f"flatten {pos} {inst} enviado"
-            v["state"]["pos"] = 0.0
+                ok, msg = True, f"flatten {pos} {inst} enviado"
+            # never write pos here: the venue is the truth, reconcile reads it
         except Exception as e:
             msg = f"flatten falló: {e}"
-    elif abs(pos) <= 1e-9:
-        ok, msg = True, "posición ya plana"
     broadcast({"type": "notice", "venue": venue, "msg": msg})
     return web.json_response({"ok": ok, "msg": msg})
 
@@ -159,6 +170,10 @@ async def place_order(request):
     if not v: return web.json_response({"ok": False, "msg": "venue desconocido"})
     side = body.get("side"); why = body.get("why", "signal")
     coid = body.get("client_order_id")
+    if coid is not None:
+        if not (isinstance(coid, str) and 0 < len(coid) <= 64):
+            return web.json_response({"ok": False, "msg": "client_order_id inválido"})
+        coid = (venue, coid)   # scoped per venue: ids never collide across venues
     if coid and coid in _SEEN_COIDS:
         prev = _SEEN_COIDS[coid]
         if prev is None:   # same id still in flight: outcome not known yet
@@ -172,8 +187,8 @@ async def place_order(request):
     except Exception as e:
         resp_ = {"ok": False, "unknown": True, "msg": str(e)[:160]}
     if coid:
-        if resp_.get("ok"):
-            _SEEN_COIDS[coid] = resp_
+        if resp_.get("ok") or resp_.get("unknown"):
+            _SEEN_COIDS[coid] = resp_     # unknown stays pinned: no 2nd fill
         else:
             _SEEN_COIDS.pop(coid, None)   # a clean reject may be retried
         while len(_SEEN_COIDS) > _SEEN_MAX:
@@ -190,7 +205,14 @@ async def _place(v, venue, body, side, why):
     # cap in NOTIONAL (R2: 100 coin units blocked every XRP/DOGE entry and
     # let through $8M of BTC); unit cap only while no price is known
     ref_px = (v.get("state") or {}).get("last_px")
-    limit_ok = (qty * ref_px <= MAX_ORDER_USD) if ref_px else qty <= 100
+    if not ref_px:
+        try:
+            ref_px = float(body.get("px") or 0) or None
+        except (TypeError, ValueError):
+            ref_px = None
+    if not ref_px:   # no price -> no notional check -> no order (round-2 #4)
+        return {"ok": False, "msg": "sin precio de referencia para el tope"}
+    limit_ok = _m.isfinite(ref_px) and ref_px > 0 and qty * ref_px <= MAX_ORDER_USD
     if not (_m.isfinite(qty) and qty > 0 and limit_ok):
         return ({"ok": False, "msg": "qty fuera de límites"})
     # FAIL-CLOSED (fallo C2): un side ausente jamás rellena como SELL
@@ -212,7 +234,7 @@ async def _place(v, venue, body, side, why):
                                       "avg_px": round(r["avg_px"], 2),
                                       "fee": round(r["fee"], 3),
                                       "slippage_bps": round(r["slippage_bps"], 2),
-                                      "pos": round(r["pos"], 6)})
+                                      "pos": r["pos"]})
         return ({"ok": False, "msg": r.get("msg", "fill falló")})
     inst = body.get("instrument") or v["state"].get("instrument")
     api = (v.get("state") or {}).get("api")
@@ -227,7 +249,13 @@ async def _place(v, venue, body, side, why):
             oid = (r or {}).get("order_id") or \
                 ((r or {}).get("metadata") or {}).get("client_order_id")
             if not oid:
-                return ({"ok": False, "msg": f"grvt rechazó: {str(r)[:120]}"})
+                # the SDK returns {} on ANY non-2xx/non-JSON (incl. a 502
+                # after GRVT accepted): only an explicit error code is a
+                # clean reject; anything else is an UNKNOWN outcome
+                if isinstance(r, dict) and r.get("code"):
+                    return ({"ok": False, "msg": f"grvt rechazó: {str(r)[:120]}"})
+                return ({"ok": False, "unknown": True,
+                         "msg": f"grvt sin order_id: {str(r)[:120]}"})
             resp = {"order_id": str(oid)[:40]}
         else:
             from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
@@ -254,12 +282,13 @@ async def open_orders(request):
     if api is None: return web.json_response([])
     try:
         if venue == "grvt":
-            r = api.post("/full/v1/open_orders", {})
+            r = await asyncio.to_thread(api.post, "/full/v1/open_orders", {})
             rows = (r.get("result") or {}).get("open_orders") or []
         else:
-            rows = [ {"symbol": o.symbol, "qty": str(o.qty), "side": str(o.side),
-                      "id": str(o.id)[:12]}
-                     for o in api.list_orders(GetOrdersRequest(status="open")) ]
+            from alpaca.trading.requests import GetOrdersRequest
+            orders = await asyncio.to_thread(api.list_orders, GetOrdersRequest(status="open"))
+            rows = [{"symbol": o.symbol, "qty": str(o.qty), "side": str(o.side),
+                     "id": str(o.id)[:12]} for o in orders]
         return web.json_response(rows)
     except Exception as e:
         return web.json_response({"error": str(e)[:120]})

@@ -78,7 +78,7 @@
         [{:id "grvt" :tag "grvt" :instrument "BTC_USDT_Perp"
           :tf :s1 :pp 31536000 :ignition true :capital-usd 1000.0}
          {:id "alpaca" :tag "alpaca" :instrument "BTC/USD"
-          :tf :m1 :pp 525600 :capital-usd 10000.0}]
+          :tf :m1 :pp 525600 :capital-usd 10000.0 :long-only true}]
         (map #(mk-spec (conj % false)) perp-specs)
         (map #(mk-spec (conj % true)) spot-specs))))
 
@@ -180,6 +180,7 @@
       (post! (str gateway-url "/order/" id)
              (json/generate-string {:side side
                                     :client_order_id (:coid ctx)
+                                    :px (double (or (:px ctx) 0.0))
                                     :qty (double qty)
                                     :z (double (or (:z ctx) 0.0))
                                     :target (double (or (:target ctx) 0.0))
@@ -194,19 +195,40 @@
 ;; R15: a restart used to forget every close — positions went unmanaged
 ;; for w bars (2-12 min, hours on thin venues). The recorder's tape of the
 ;; SAME venue (rule 4) refills the window at boot.
+(defn window-cap
+  "Closes kept per venue: 2w, never below 960 so a hot-reload to any
+  promotable w (grids reach 480) never falls back to :warming (round-2 #11)."
+  ^long [w] (max (* 2 (long w)) 960))
+
+(def tape-stale-ms
+  "A tape whose file was not written in this long is not today's market:
+  seeding from it would make the first live return span the gap."
+  10000)
+
 (defn tape-closes
-  "Last n 1s closes of `tag` from the newest tape in dir, [] if none."
+  "Last n 1s closes of `tag` from its own tapes in dir (newest day first,
+  then the previous ones), [] when the newest tape is stale or missing."
   [dir tag n]
-  (let [suffix (str "_" tag ".prints")
-        f (->> (.listFiles (java.io.File. ^String dir))
-               (filter (fn [^java.io.File f] (.endsWith (.getName f) suffix)))
-               (sort-by (fn [^java.io.File f] (.getName f)))
-               last)]
-    (if f
-      (let [cs (try (hot/read-prints-tape (.getPath ^java.io.File f) (* 40 (long n)))
-                    (catch Exception _ []))]
-        (vec (take-last n (filter valid-px? cs))))
-      [])))
+  (let [n (long n)
+        suffix (str "_" tag ".prints")
+        files (->> (.listFiles (java.io.File. ^String dir))
+                   (filter (fn [^java.io.File f] (.endsWith (.getName f) suffix)))
+                   (sort-by (fn [^java.io.File f] (.getName f)) #(compare %2 %1)))
+        ^java.io.File newest (first files)]
+    (if (or (nil? newest)
+            (> (- (now-ms) (.lastModified newest)) tape-stale-ms))
+      []
+      (loop [fs files acc []]
+        (if (or (empty? fs) (>= (count acc) n))
+          (vec (take-last n acc))
+          (let [^java.io.File f (first fs)
+                cs (try (filterv valid-px?
+                                 (hot/read-prints-tape (.getPath f) Integer/MAX_VALUE))
+                        (catch Exception _ []))
+                ;; the newest tape's last second is still OPEN: the live
+                ;; closer will close it — seeding it too doubles that bar
+                cs (if (and (identical? f newest) (seq cs)) (pop cs) cs)]
+            (recur (rest fs) (into cs acc))))))))
 
 (def quote-stale-ms 5000)
 
@@ -217,6 +239,19 @@
   (when (< (- (now-ms) (long @(:quote-ts st))) quote-stale-ms)
     @(get st k)))
 
+(defn quote-stale?
+  "The venue HAS had quotes but the last is older than quote-stale-ms:
+  its spread is unknown NOW, so risk-adding orders must wait (round-2 #7)."
+  [st]
+  (let [t (long @(:quote-ts st))]
+    (and (pos? t) (>= (- (now-ms) t) quote-stale-ms))))
+
+(defn reject-gap-ms
+  "Order spacing after n consecutive clean rejects: 2 s, then doubling up
+  to 5 min — a permanent reject must not re-sign every 2 s (round-2 #8)."
+  ^long [n]
+  (min 300000 (* min-order-gap-ms (bit-shift-left 1 (min 10 (max 0 (- (long n) 2)))))))
+
 (def ^:private order-seq (atom 0))
 (defn new-coid
   "Client order id: the gateway executes each id at most once."
@@ -224,8 +259,10 @@
 
 (def settle-ms
   "An order younger than this may not be visible in the venue's position
-  yet: reconcile must not overwrite with a read that may predate it (R4)."
-  3000)
+  yet: reconcile must not overwrite with a read that may predate it (R4).
+  Above the brain's 5 s HTTP timeout + the gateway's SDK time, and counted
+  from the RESPONSE (round-2 #3)."
+  10000)
 
 (defn reconcile-apply?
   "Apply a venue position read that STARTED at t0? Only when no order was
@@ -234,6 +271,26 @@
   [t0 last-order-ms pos-before pos-now]
   (and (< (long last-order-ms) (- (long t0) settle-ms))
        (= pos-before pos-now)))
+
+(defn reconcile-venue!
+  "Apply one venue position read (started at t0, when the brain held p0).
+  :skipped — the read may predate an in-flight order (R4); :same — the
+  venue agrees; :adopted — the venue truth replaced the brain's;
+  :raced — a bar moved pos during the read (next round re-reads).
+  :await clears ONLY on :same/:adopted (round-2 #2: a by-identity CAS
+  failed on re-boxed doubles and cleared await anyway -> double order)."
+  [st t0 p0 vp]
+  (if-not (reconcile-apply? t0 @(:last-order st) p0 @(:pos st))
+    :skipped
+    (let [p0 (double p0) vp (double vp)
+          same? (<= (Math/abs (- vp p0)) 1e-9)
+          [_ now] (if same?
+                    [nil vp]
+                    (swap-vals! (:pos st)
+                                (fn [cur] (if (== (double cur) p0) vp cur))))
+          adopted? (or same? (== (double now) vp))]
+      (when adopted? (reset! (:await st) false))
+      (cond same? :same adopted? :adopted :else :raced))))
 
 (defn venue-position!
   "Posición según el VENUE, o nil si no está disponible — jamás 0.0:
@@ -267,7 +324,7 @@
   UNITS. Returns {:action :warming} until w closes exist, else the target
   and one action: :throttle | :ignite | :gate | :order | :hold."
   [{:keys [cs k w threshold side spec px pos-u bid ask since-last-ms ignited?
-           awaiting?]}]
+           awaiting? gap-ms quote-stale?]}]
   (cond
     (< (count cs) w) {:action :warming}
     (not (valid-px? px)) {:action :hold :pos-u pos-u}
@@ -299,7 +356,7 @@
       (assoc base :action
              (cond
                awaiting? :await
-               (< (double since-last-ms) min-order-gap-ms) :throttle
+               (< (double since-last-ms) (double (or gap-ms min-order-gap-ms))) :throttle
                (and (:ignition spec) (zero? pos-u) (not ignited?)) :ignite
                ;; >= $1 notional: the units<->weight round trip leaves
                ;; ~1e-16 residue that must not trade
@@ -307,9 +364,10 @@
                ;; R14: gate what ADDS risk (long or short entry), never
                ;; an exit; unknown spread passes (thin venues without a
                ;; quote feed would never trade otherwise)
-               (and (< spread-bps 9000.0)
-                    (> (Math/abs newpos-u) (Math/abs pos-u))
-                    (> spread-bps max-spread-bps)) :gate
+               (and (> (Math/abs newpos-u) (Math/abs pos-u))
+                    (or quote-stale?       ; a venue WITH quotes whose feed died
+                        (and (< spread-bps 9000.0)
+                             (> spread-bps max-spread-bps)))) :gate
                :else :order)
              :side (if (pos? delta-u) "buy" "sell")
              :qty (Math/abs delta-u)))))
@@ -323,11 +381,15 @@
                                {:spec s :closes (atom []) :pos (atom 0.0)
                                 :bid (atom nil) :ask (atom nil)
                                 :closer (atom nil) :last-order (atom 0) :await (atom false)
+                                :rejects (atom 0)
                                 :quote-ts (atom 0)
                                 :ignited (atom false)
                                 :last-bar-ts (atom 0) :errors (atom 0)}])
                             venue-specs)))
         last-msg-ms (atom (now-ms))
+        ;; tag -> runtime: O(1) routing (a linear scan of 27 venues ran
+        ;; on every one of ~300 prints/s)
+        by-tag (into {} (map (fn [s] [(:tag s) (get @rt (:id s))]) venue-specs))
         pending (atom (StringBuilder.))
         emit (fn [ev]
                (append! "live/clj_events.jsonl" (json/generate-string ev))
@@ -340,13 +402,17 @@
                         {:keys [k w threshold side]} (champion-params
                                                       (if (= :s1 (:tf spec))
                                                         :scalp :swing))
-                        cs (swap! (:closes st) trim-window px (* 2 w))]
+                        ;; capacity covers any promotable w (grids reach 360/480):
+                        ;; a hot-reload to a larger w must not drop to :warming
+                        cs (swap! (:closes st) trim-window px (window-cap w))]
                     (let [{:keys [action z target newpos-u pos-u spread-bps]
                            :as pl}
                           (plan {:cs cs :k k :w w :threshold threshold
                                  :side side :spec spec :px px :pos-u pos
                                  :bid bid :ask ask
                                  :since-last-ms (- (now-ms) @(:last-order st))
+                                 :gap-ms (reject-gap-ms @(:rejects st))
+                                 :quote-stale? (quote-stale? st)
                                  :ignited? @(:ignited st)
                                  :awaiting? @(:await st)})]
                      (if (= action :warming)
@@ -372,6 +438,7 @@
                                                     {:z z-now :target newpos
                                                      :spread spread-bps
                                                      :coid (new-coid id)
+                                                     :px px
                                                      :why "ignition"})]
                                 (when (:unknown r) (reset! (:await st) true))
                                 (emit {:type "order" :venue id :side "buy"
@@ -389,10 +456,20 @@
                                                 {:z z-now :target newpos
                                                  :spread spread-bps
                                                  :coid (new-coid id)
+                                                 :px px
                                                  :why "scalp"})]
-                            ;; unknown outcome: stop deciding this venue
-                            ;; until reconcile reads the truth (R6)
+                            ;; settle counts from the ANSWER; unknown outcome
+                            ;; freezes the venue until reconcile reads truth
+                            (reset! (:last-order st) (now-ms))
                             (when (:unknown r) (reset! (:await st) true))
+                            ;; clean reject: exponential backoff (round-2 #8)
+                            (if (:ok r)
+                              (reset! (:rejects st) 0)
+                              (when-not (:unknown r)
+                                (let [n (swap! (:rejects st) inc)]
+                                  (when (= 3 n)
+                                    (emit {:type "error" :venue id
+                                           :msg (str "rechazos repetidos: " (:msg r))})))))
                             (emit {:type "order" :venue id :side (:side pl)
                                    :qty (:qty pl) :px px
                                    :z z-now :resp (str r)})
@@ -410,10 +487,8 @@
                                                :bid (fresh-quote st :bid) :ask (fresh-quote st :ask)})]
                           (reset! (:pos st) newpos)))))
         on-print (fn [m]
-                   (let [[venue-id st] (first (filter (fn [[_ s]]
-                                                        (= (:tag (:spec s))
-                                                           (:venue m)))
-                                                      @rt))]
+                   (let [st (get by-tag (:venue m))
+                         venue-id (:id (:spec st))]
                      (when (and st (valid-px? (:px m)))
                        (let [px (double (:px m)) sec (long (:sec m))
                              closer (:closer st)]
@@ -431,10 +506,7 @@
                     ;; nativa jamás lo lleva; sin el guard el cerebro se
                     ;; re-decide sobre sus ecos (~2/s) y envenena
                     ;; :last-bar-ts con microsegundos.
-                    (let [[_ st] (first (filter (fn [[_ s]]
-                                                  (= (:tag (:spec s))
-                                                     (:venue m)))
-                                                @rt))]
+                    (let [st (get by-tag (:venue m))]
                       (when (and st (nil? (:target m)) (valid-px? (:close m)))
                         (let [ts (long (:ts m))]
                           (when (> ts @(:last-bar-ts st))
@@ -471,10 +543,7 @@
                                  (= t "print") (on-print m)
                                  (= t "bar") (on-bar-1m m)
                                  (= t "quote")
-                                 (let [[_ st] (first (filter
-                                                      (fn [[_ s]]
-                                                        (= (:tag (:spec s)) (:venue m)))
-                                                      @rt))]
+                                 (let [st (get by-tag (:venue m))]
                                    (when (and st (:bid m) (:ask m)
                                               (pos? (double (:bid m))))
                                      (reset! (:bid st) (double (:bid m)))
@@ -507,7 +576,7 @@
     (doseq [{:keys [id tag tf]} venue-specs
             :when (= :s1 tf)]
       (let [cs (tape-closes "live/tape" tag
-                            (* 2 (long (:w (champion-params :scalp)))))]
+                            (window-cap (:w (champion-params :scalp))))]
         (when (seq cs)
           (reset! (:closes (get @rt id)) cs))))
     (emit {:type "notice" :venue "brain"
@@ -542,13 +611,8 @@
                :closes (into {} (map (fn [[id st]]
                                        [id (count @(:closes st))])
                                      @rt))}))
-      (when (> (- (now-ms) @last-msg-ms) 90000)
-        (emit {:type "error" :venue "brain"
-               :msg "watchdog: relé mudo >90s, reinicio"})
-        (System/exit 1))
       (let [answered (atom 0)
-            err2
-            (reduce (fn [acc {:keys [id]}]
+            _ (reduce (fn [acc {:keys [id]}]
                       (let [st (get @rt id)
                             t0 (now-ms)
                             p0 @(:pos st)
@@ -561,13 +625,9 @@
                           (do (swap! answered inc)
                               ;; R4: a read that may predate an in-flight
                               ;; order is skipped (next round re-reads)
-                              (when (reconcile-apply? t0 @(:last-order st)
-                                                      p0 @(:pos st))
-                                (when (> (Math/abs (- (double vp) (double p0))) 1e-9)
-                                  (when (compare-and-set! (:pos st) p0 vp)
-                                    (emit {:type "reconcile" :venue id
-                                           :interno p0 :venue-pos vp})))
-                                (reset! (:await st) false))
+                              (when (= :adopted (reconcile-venue! st t0 p0 vp))
+                                (emit {:type "reconcile" :venue id
+                                       :interno p0 :venue-pos vp}))
                               acc))))
                     0 venue-specs)
             ;; presupuesto de errores CONSECUTIVOS: si NADIE responde

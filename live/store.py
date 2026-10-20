@@ -157,6 +157,10 @@ def stats(venue):
     orders = c.execute("SELECT COUNT(*) FROM orders WHERE venue=?", (venue,)).fetchone()[0]
     return {"bars": bars, "orders": orders}
 
+init()
+
+TAPE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tape")
+
 def tape(venue, obj):
     """Cinta append-only BINARIA del venue (rotación diaria, UTC):
     print  -> <day>_<venue>.prints  12 B/registro  struct '<Id' (sec u32, px f64)

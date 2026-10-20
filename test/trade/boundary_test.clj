@@ -45,3 +45,10 @@
            "grvt_sdk_order.py" "recorder.py" "relay.py" "server.py"
            "store.py"}
          (set (py-files)))))
+
+(deftest store-module-boots
+  ;; round 2: deleting `metrics` also deleted init() and TAPE_DIR — the
+  ;; recorder would have died with NameError on its next restart
+  (let [src (slurp "live/store.py")]
+    (is (re-find #"(?m)^init\(\)\s*$" src) "schema created at import")
+    (is (re-find #"(?m)^TAPE_DIR\s*=" src) "tape dir defined at module level")))

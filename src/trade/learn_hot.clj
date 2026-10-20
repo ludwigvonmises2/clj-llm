@@ -102,9 +102,14 @@
                    java.nio.file.StandardCopyOption/ATOMIC_MOVE])))))
 
 (defn tapes-promote?
-  "Honest gate: wins on >= 60 % of venues and never with zero wins."
+  "Rule 3, literally: N/N. Every venue must win, never with zero venues."
   [wins of]
-  (and (pos? wins) (pos? of) (>= wins (long (Math/ceil (* 0.6 of))))))
+  (and (pos? of) (= wins of)))
+
+(defn nn?
+  "Rule 3 gate for fold-verify results: all folds won, at least one fold."
+  [wins folds]
+  (and (pos? (long folds)) (= (long wins) (long folds))))
 
 (defn main
   [& args]
@@ -151,7 +156,7 @@
         ;; el comparador recibe un vector); PUERTA: sin pliegues
         ;; ganados no hay campeón (regla 3)
         campeon (last (sort-by (juxt :real-wins :synth-rate) resultados))]
-    (if (pos? (:real-wins campeon))
+    (if (nn? (:real-wins campeon) (:real-folds campeon))
       (do (write-champion-section! :profile
                                    (select-keys campeon [:k :w :threshold :name
                                                          :real-wins :real-folds]))
@@ -196,7 +201,7 @@
     ;; PUERTA DE PROMOCIÓN (regla 3): un campeón con score 0 — que no
     ;; gana NI UN pliegue con costes reales — jamás se promueve; el
     ;; cerebro sigue con sus defaults validados o con lo que haya
-    (if (pos? (:score campeon))
+    (if (>= (double (:score campeon)) 1.0)   ; N/N: score = wins/folds
       (do
         (println (format "CAMPEÓN SCALP: k=%d w=%d z=%.1f | score %.2f | vecinos %.2f"
                          (:k campeon) (:w campeon) (:threshold campeon)
@@ -250,6 +255,9 @@
                  :closes (try (read-prints-tape (.getPath f) max-closes)
                               (catch Exception _ []))})))
        (filter (fn [s] (>= (count (:closes s)) 1500)))
+       ;; one series per tag: yesterday's and today's file of the same
+       ;; venue are NOT two venues (they inflated the venue gate)
+       (reduce (fn [acc s] (if (some #(= (:venue %) (:venue s)) acc) acc (conj acc s))) [])
        (take n)
        (vec)))
 
@@ -347,10 +355,11 @@
     (println (format "CAMPEÓN SWING: k=%d w=%d z=%.1f | %d/%d pliegues"
                      (:k campeon) (:w campeon) (:threshold campeon)
                      (:wins campeon) (:folds campeon)))
-    (write-champion-section! :swing {:k (:k campeon) :w (:w campeon)
+    (when (nn? (:wins campeon) (:folds campeon))   ; rule 3: N/N or nothing
+     (write-champion-section! :swing {:k (:k campeon) :w (:w campeon)
                                 :threshold (:threshold campeon)
                                 :name "swing-grid" :wins (:wins campeon)
-                                :folds (:folds campeon)})
+                                :folds (:folds campeon)}))
     campeon))
 
 (defn -main [& args]
