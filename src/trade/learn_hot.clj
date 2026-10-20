@@ -202,6 +202,119 @@
                "NO se promueve campeón (la señal pura no basta en 1s)"))
     campeon))
 
+;; ---------- APRENDIZAJE DESDE CINTAS (por venue y activo) ----------
+
+(defn read-prints-tape
+  "Cinta binaria '<Id' intercalado LE (sec u32 + px f64) → closes 1s.
+  Lee solo las últimas max-closes velas del fichero."
+  [path max-closes]
+  (let [raw (Files/readAllBytes (Paths/get path (into-array String [])))
+        recs (quot (alength raw) 12)
+        n (min max-closes recs)
+        bb (doto (java.nio.ByteBuffer/wrap raw)
+             (.order java.nio.ByteOrder/LITTLE_ENDIAN)
+             (.position (* 12 (- recs n))))]
+    (loop [i 0 prev -1 cur nil acc (transient [])]
+      (if (>= i n)
+        (let [v (persistent! (if (and cur prev (not= prev -1))
+                               (conj! acc cur) acc))]
+          (vec v))
+        (let [sec (.getInt bb)
+              px (.getDouble bb)]
+          (cond
+            (= sec prev) (recur (inc i) sec px acc)
+            (neg? prev) (recur (inc i) sec px acc)
+            :else (recur (inc i) sec px (conj! acc cur))))))))
+
+(defn tape-series
+  "Todas las cintas .prints de los últimos días → series de closes por
+  venue:activo, las n-más largas primero."
+  [dir n max-closes]
+  (->> (file-seq (io/file dir))
+       (filter (fn [f] (-> (.getName f) (.endsWith ".prints"))))
+       (sort-by #(.lastModified %) >)
+       (map (fn [f]
+              (let [nm (.getName f)                       ; 20261020_okx:btc-usdt-swap.prints
+                    tag (subs nm 9 (- (count nm) 7))]
+                {:venue tag
+                 :closes (try (read-prints-tape (.getPath f) max-closes)
+                              (catch Exception _ []))})))
+       (filter (fn [s] (>= (count (:closes s)) 500)))
+       (take n)
+       (vec)))
+
+(def ^:private tape-configs
+  ;; familia scalp condensada (9 configs): las de la escalera del grid
+  (for [k [20 40 60] w [120 360] thr [1.5 2.5]]
+    {:k k :w w :threshold thr :ppy 31536000 :tv 0.30}))
+
+(defn train-tapes
+  "El aprendiz sobre las CINTAS reales de cada venue y activo, y sus
+  escenarios sintéticos Monte Carlo (bootstrap por bloques de la propia
+  cinta + amplificación de vol 0.5×/2×): la microestructura validada es
+  LA DE ESA VENUE, no un sustituto genérico. Promueve :scalp solo si la
+  config gana en real Y no pierde en la mayoría de los sintéticos."
+  []
+  (let [series (tape-series "live/tape" 8 20000)]
+    (if (empty? series)
+      (println "TAPES: sin cintas suficientes todavía (mín. 500 velas/venue)")
+      (do
+        (println "TAPES: entrenando sobre" (count series) "series de venues:")
+        (doseq [s series] (println "  " (:venue s) (count (:closes s)) "velas"))
+        (let [rng (java.util.Random. 42)
+              score (fn [closes cfg]
+                      (let [sigfn (sigfn-for cfg)
+                            [w n] (portfolio/fold-verify closes sigfn 31536000
+                                                         cost 3 8000 false)]
+                        (if (pos? n) (double (/ w n)) 0.0)))
+              ranked
+              (doall
+               (for [cfg tape-configs]
+                 (let [t0 (System/currentTimeMillis)
+                       per-venue
+                       (for [s series]
+                         (let [cl (:closes s)
+                               real (score cl cfg)
+                               ;; Monte Carlo de LA PROPIA CINTA:
+                               ;; bootstrap por bloques + amplificación 2×
+                               b1 (block-bootstrap cl rng)
+                               s1 (score (vec (take 8000 b1)) cfg)
+                               s2 (score (vec (take 8000 (amplify b1 2.0))) cfg)]
+                           {:venue (:venue s) :real real
+                            :synth (/ (+ s1 s2) 2.0)}))
+                       wins (count (filter (fn [pv] (and (pos? (:real pv))
+                                                         (>= (:synth pv) 0.5)))
+                                           per-venue))]
+                   (println (format "  k=%d w=%d z=%.1f -> gana %d/%d venues (%.0fs)"
+                                    (:k cfg) (:w cfg) (:threshold cfg)
+                                    wins (count series)
+                                    (/ (- (System/currentTimeMillis) t0) 1000.0))
+                            (flush))
+                   (assoc cfg :wins wins :of (count series)))))
+              campeon (last (sort-by :wins ranked))]
+          (if (and (pos? (:wins campeon))
+                   (>= (:wins campeon) (int (Math/ceil (* 0.6 (:of campeon))))))
+            (do
+              (println (format "CAMPEÓN TAPES: k=%d w=%d z=%.1f -> %d/%d venues"
+                               (:k campeon) (:w campeon) (:threshold campeon)
+                               (:wins campeon) (:of campeon)))
+              (let [prev (try (edn/read-string (slurp "live/champion.edn"))
+                              (catch Exception _ {}))
+                    tmp "live/champion.edn.tmp"]
+                (spit tmp (str (assoc (or prev {})
+                                      :scalp {:k (:k campeon) :w (:w campeon)
+                                              :threshold (:threshold campeon)
+                                              :name "scalp-tapes"
+                                              :wins (:wins campeon)
+                                              :of (:of campeon)}) "\n"))
+                (java.nio.file.Files/move
+                 (java.nio.file.Paths/get (str tmp) (into-array String []))
+                 (java.nio.file.Paths/get "live/champion.edn" (into-array String []))
+                 (into-array java.nio.file.StandardCopyOption
+                             [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))))
+            (println "TAPES: ninguna config gana en ≥60% de venues —"
+                     "no se promueve campeón")))))))
+
 (defn ^:private grid-1m
   "Entrenamiento SWING: familia sobre velas 1m reales (corpus histórico
   de 1 año). Escribe la sección :swing del champion."
@@ -241,6 +354,7 @@
 
 (defn -main [& args]
   (cond
+    (= "--tapes" (first args)) (train-tapes)
     (= "--1m" (first args)) (grid-1m)
     (= "--1s" (first args))
     (let [path (or (second args) "data/market/BTCUSDT_1s.json")

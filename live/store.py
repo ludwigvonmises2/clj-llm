@@ -45,10 +45,21 @@ def save_executor_state(venue, state):
     conn().commit()
 
 def load_executor_state(venue):
+    """Restauración VALIDADA: una fila corrupta (NaN/inf/texto) jamás
+    envenena el estado vivo — se descarta y el venue arranca plano."""
     row = conn().execute(
         "SELECT pos, entry, realized FROM executor_state WHERE venue=?",
         (venue,)).fetchone()
-    return {"pos": row[0], "entry": row[1], "realized": row[2]} if row else None
+    if not row:
+        return None
+    try:
+        import math
+        vals = [float(x) for x in row]
+        if not all(math.isfinite(x) for x in vals):
+            raise ValueError("no finito")
+        return {"pos": vals[0], "entry": vals[1], "realized": vals[2]}
+    except Exception:
+        return None
 
 def bar(venue, ts, close, target, z, position, state):
     conn().execute(

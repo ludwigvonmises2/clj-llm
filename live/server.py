@@ -60,6 +60,15 @@ VENUES = [
 
 pre_loop_queue = []
 
+def persist_executor(venue, v):
+    """Write-through compartido por TODA mutación de posición virtual:
+    fill, flatten — ninguna ruta puede saltárselo. Si la DB falla, el
+    fill cuenta (ya ocurrió) pero se alerta: estado DB ≠ vivo."""
+    try:
+        store.save_executor_state(venue, v["state"])
+    except Exception as e:
+        print(f"PERSISTENCIA FALLÓ {venue}: {e}", flush=True)
+
 def broadcast(ev):
     ev = dict(ev)
     ev.setdefault("venue", "sistema")
@@ -95,6 +104,7 @@ async def flatten(request):
             r = executors.execute(st, "sell" if pos > 0 else "buy",
                                   abs(pos), why="flatten")
             if r.get("ok"):
+                persist_executor(venue, v)
                 ok, msg = True, f"flatten {pos} @ {r['avg_px']:.2f}"
             else:
                 ok, msg = False, f"flatten falló: {r.get('msg')}"
@@ -134,8 +144,14 @@ async def place_order(request):
     body = await request.json()
     v = next((v for v in VENUES if v["id"] == venue), None)
     if not v: return web.json_response({"ok": False, "msg": "venue desconocido"})
-    side = body.get("side"); qty = float(body.get("qty") or 0)
-    why = body.get("why", "signal")
+    side = body.get("side"); why = body.get("why", "signal")
+    try:
+        qty = float(body.get("qty") or 0)
+    except (TypeError, ValueError):
+        return web.json_response({"ok": False, "msg": "qty inválida"})
+    import math as _m
+    if not (_m.isfinite(qty) and 0 < qty <= 100):
+        return web.json_response({"ok": False, "msg": "qty fuera de límites"})
     # FAIL-CLOSED (fallo C2): un side ausente jamás rellena como SELL
     if side not in ("buy", "sell"):
         return web.json_response({"ok": False, "msg": "side requerido"})
@@ -144,7 +160,7 @@ async def place_order(request):
         import executors
         r = executors.execute(v["state"], side, qty, why=why)
         if r.get("ok"):
-            store.save_executor_state(venue, v["state"])   # write-through
+            persist_executor(venue, v)
             store.order(venue, int(time.time() * 1000), side, qty,
                         r["avg_px"], f"{venue}-{int(time.time() * 1000)}",
                         z=body.get("z"), target=body.get("target"),
